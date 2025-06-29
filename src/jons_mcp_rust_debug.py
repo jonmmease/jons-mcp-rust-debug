@@ -48,7 +48,7 @@ GDB_CURRENT_LOCATION_PATTERN = re.compile(r"^(0x[0-9a-fA-F]+) in (.+) \(.*\) at 
 GDB_STACK_FRAME_PATTERN = re.compile(r"^#(\d+)\s+(0x[0-9a-fA-F]+) in (.+) \(.*\) at (.+):(\d+)")
 
 # LLDB patterns  
-LLDB_BREAKPOINT_SET_PATTERN = re.compile(r"Breakpoint (\d+): where = .+ at (.+):(\d+)")
+LLDB_BREAKPOINT_SET_PATTERN = re.compile(r"^Breakpoint (\d+): (?:where = .+ at |file = '?)(.+?)(?:'?, line = |:)(\d+)", re.MULTILINE)
 LLDB_CURRENT_LOCATION_PATTERN = re.compile(r"frame #\d+: 0x[0-9a-fA-F]+ .+`(.+) at (.+):(\d+)")
 LLDB_STACK_FRAME_PATTERN = re.compile(r"frame #(\d+): 0x[0-9a-fA-F]+ .+`(.+) at (.+):(\d+)")
 
@@ -367,6 +367,19 @@ class RustDebugClient:
         except Exception as e:
             logger.error(f"Writer thread error: {e}")
 
+    def _stderr_reader(self, session: DebugSession):
+        """Thread for reading stderr output from debugger subprocess"""
+        try:
+            while session.process and session.process.stderr and session.process.poll() is None:
+                line = session.process.stderr.readline()
+                if line:
+                    # Log stderr output for debugging but don't mix with stdout
+                    logger.debug(f"Debugger stderr: {line.strip()}")
+                else:
+                    break
+        except Exception as e:
+            logger.error(f"Stderr reader thread error: {e}")
+
     def _wait_for_prompt(self, session: DebugSession, timeout: float = 5.0) -> bool:
         """Wait for debugger prompt to appear"""
         start_time = time.time()
@@ -391,10 +404,19 @@ class RustDebugClient:
 
         return False
 
+    def _clear_output_buffer(self, session: DebugSession):
+        """Clear any pending output from the debugger"""
+        try:
+            while True:
+                session.output_queue.get_nowait()
+        except queue.Empty:
+            pass
+        session.last_output = ""
+
     def _send_command(self, session: DebugSession, command: str, wait_for_response: bool = True) -> str:
         """Send command to debugger and optionally wait for response"""
-        # Clear the output buffer
-        session.last_output = ""
+        # Clear any pending output first
+        self._clear_output_buffer(session)
         
         # Send command
         session.command_queue.put(command)
@@ -444,7 +466,7 @@ class RustDebugClient:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,  # Separate stderr to avoid mixing with stdout
                 text=True,
                 bufsize=0,
                 cwd=self.config.working_directory,
@@ -462,14 +484,35 @@ class RustDebugClient:
                 args=(session,),
                 daemon=True
             )
+            # Add stderr reader to consume stderr output
+            stderr_thread = threading.Thread(
+                target=self._stderr_reader,
+                args=(session,),
+                daemon=True
+            )
             
             session.reader_thread.start()
             session.writer_thread.start()
+            stderr_thread.start()
             
             # Wait for initial prompt
-            if not self._wait_for_prompt(session):
+            if not self._wait_for_prompt(session, timeout=10.0):
                 session.process.terminate()
                 raise RuntimeError("Failed to get initial debugger prompt")
+            
+            # For rust-lldb, consume any initialization output (type formatters, etc.)
+            if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+                # Give it a moment to finish initialization
+                time.sleep(0.5)
+                self._clear_output_buffer(session)
+                
+                # Send a simple command to ensure we're ready
+                try:
+                    test_output = self._send_command(session, "version")
+                    logger.debug(f"LLDB version check: {test_output}")
+                except:
+                    # If version command fails, just continue
+                    pass
             
             # Initialize debugger settings
             if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
@@ -675,7 +718,9 @@ async def set_breakpoint(
             cmd += " --one-shot true"
     
     # Send command
+    logger.info(f"Setting breakpoint with command: {cmd}")
     output = debug_client._send_command(session, cmd)
+    logger.debug(f"Breakpoint command output: {output}")
     
     # Parse breakpoint ID
     breakpoint_id = None
@@ -684,12 +729,24 @@ async def set_breakpoint(
         if match:
             breakpoint_id = int(match.group(1))
     else:  # LLDB
-        match = re.search(r"Breakpoint (\d+):", output)
-        if match:
-            breakpoint_id = int(match.group(1))
+        # LLDB output format: "Breakpoint 1: where = ..." or "Breakpoint 1: file = '...', line = ..."
+        # Make sure we're not matching type formatter output
+        lines = output.strip().split('\n')
+        for line in lines:
+            # Only look for lines that start with "Breakpoint X:"
+            if line.strip().startswith("Breakpoint ") and ":" in line:
+                match = re.match(r"^\s*Breakpoint (\d+):", line)
+                if match:
+                    breakpoint_id = int(match.group(1))
+                    logger.debug(f"Found breakpoint ID {breakpoint_id} in line: {line}")
+                    break
     
     if breakpoint_id is None:
-        return {"status": "error", "error": f"Failed to parse breakpoint ID from: {output}"}
+        # Log the full output for debugging
+        logger.error(f"Failed to parse breakpoint ID. Command: {cmd}")
+        logger.error(f"Output: {repr(output)}")
+        logger.error(f"Output lines: {output.strip().split(chr(10))}")
+        return {"status": "error", "error": f"Failed to parse breakpoint ID. The debugger may need more time to initialize or the file/line may not be valid."}
     
     # Store breakpoint info
     bp = Breakpoint(
