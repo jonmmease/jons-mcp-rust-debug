@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+.pixi/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# MCP/Project specific
+rustdebugconfig.json
+*.log
+.cache/
+
+# Testing
+test_output/
+tmp/

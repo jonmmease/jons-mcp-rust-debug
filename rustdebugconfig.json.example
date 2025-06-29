@@ -1,0 +1,10 @@
+{
+  "debugger": null,
+  "cargo_path": null,
+  "working_directory": ".",
+  "environment": {
+    "RUST_BACKTRACE": "1"
+  },
+  "cargo_args": [],
+  "prefer_rust_wrappers": true
+}
