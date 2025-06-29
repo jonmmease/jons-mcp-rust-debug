@@ -243,9 +243,14 @@ class RustDebugClient:
     def _event_handler_thread(self, session: DebugSession):
         """Thread to handle LLDB events"""
         try:
-            while session.process and session.process.IsValid():
+            while session.state not in (DebuggerState.FINISHED, DebuggerState.ERROR):
+                # Check if process is still valid
+                if not session.process or not session.process.IsValid():
+                    break
+                    
                 event = lldb.SBEvent()
-                if session.listener.WaitForEvent(1, event):
+                # Use a shorter timeout to be more responsive to state changes
+                if session.listener.WaitForEvent(0.5, event):
                     if lldb.SBProcess.EventIsProcessEvent(event):
                         state = lldb.SBProcess.GetStateFromEvent(event)
                         
@@ -256,8 +261,13 @@ class RustDebugClient:
                             session.state = DebuggerState.RUNNING
                         elif state == lldb.eStateExited:
                             session.state = DebuggerState.FINISHED
+                            break  # Exit the loop
                         elif state == lldb.eStateCrashed:
                             session.state = DebuggerState.ERROR
+                            break  # Exit the loop
+                        elif state == lldb.eStateDetached:
+                            session.state = DebuggerState.FINISHED
+                            break  # Exit the loop
                             
                     # Handle other event types if needed
                     elif event.GetType() == lldb.SBTarget.eBroadcastBitBreakpointChanged:
@@ -267,6 +277,8 @@ class RustDebugClient:
         except Exception as e:
             logger.error(f"Event handler error: {e}")
             session.state = DebuggerState.ERROR
+        finally:
+            logger.debug(f"Event handler thread exiting for session {session.session_id}")
 
     def _update_stop_info(self, session: DebugSession):
         """Update stop information when process stops"""
@@ -376,17 +388,49 @@ class RustDebugClient:
             return
         
         try:
-            # Stop the process
+            # Mark session as finished to signal event thread to exit
+            session.state = DebuggerState.FINISHED
+            
+            # Stop the process if it's running
             if session.process and session.process.IsValid():
-                session.process.Kill()
+                state = session.process.GetState()
+                if state != lldb.eStateExited and state != lldb.eStateDetached:
+                    # Try to stop gracefully first
+                    error = session.process.Stop()
+                    if error.Success():
+                        # Give it a moment to stop
+                        time.sleep(0.1)
+                    
+                    # Then kill if still running
+                    if session.process.IsValid():
+                        session.process.Kill()
+                        # Wait a bit for the kill to take effect
+                        time.sleep(0.1)
+            
+            # Wait for event thread to finish (with timeout)
+            if session.event_thread and session.event_thread.is_alive():
+                session.event_thread.join(timeout=2.0)
+                if session.event_thread.is_alive():
+                    logger.warning(f"Event thread for session {session_id} did not terminate cleanly")
+            
+            # Clear the listener
+            if session.listener:
+                session.listener.Clear()
             
             # Destroy the debugger
             if session.debugger:
+                # Clear any remaining commands
+                session.debugger.HandleCommand("quit")
+                # Small delay to let quit process
+                time.sleep(0.1)
                 lldb.SBDebugger.Destroy(session.debugger)
+                
         except Exception as e:
             logger.error(f"Error stopping session {session_id}: {e}")
-        
-        del self.sessions[session_id]
+        finally:
+            # Always remove from sessions dict
+            if session_id in self.sessions:
+                del self.sessions[session_id]
     
     def _stop_reason_to_string(self, reason: int) -> str:
         """Convert LLDB stop reason to string."""
