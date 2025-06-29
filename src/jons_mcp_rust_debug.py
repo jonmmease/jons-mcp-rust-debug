@@ -606,15 +606,34 @@ debug_client = RustDebugClient()
 
 
 # Helper function for pretty-printing Rust types
-def pretty_print_rust_value(raw_output: str) -> str:
-    """Attempt to pretty-print Rust debugger output."""
+def pretty_print_rust_value(raw_output: str, enum_hints: Optional[Dict[int, str]] = None) -> str:
+    """Attempt to pretty-print Rust debugger output.
+    
+    Args:
+        raw_output: Raw debugger output
+        enum_hints: Optional dict mapping discriminant values to variant names
+    """
     try:
-        # Basic indentation improvement
+        # First, remove duplicate lines (common LLDB issue)
         lines = raw_output.split('\n')
+        seen_lines = set()
+        unique_lines = []
+        
+        for line in lines:
+            # Skip lines that are debugger commands
+            if 'expression -T --' in line or 'print' in line and line.strip().startswith('print'):
+                continue
+            
+            stripped = line.strip()
+            if stripped and stripped not in seen_lines:
+                unique_lines.append(line)
+                seen_lines.add(stripped)
+        
+        # Now format with proper indentation
         result = []
         indent = 0
         
-        for line in lines:
+        for line in unique_lines:
             line = line.strip()
             if not line:
                 continue
@@ -633,13 +652,33 @@ def pretty_print_rust_value(raw_output: str) -> str:
         output = '\n'.join(result)
         
         # Try to resolve enum discriminants
-        # Look for patterns like "$discr$ = 7" and add context if possible
         if '$discr$' in output:
-            # This is an enum, try to add variant name
-            output = re.sub(r'\$discr\$ = (\d+)', r'variant_discriminant = \1', output)
+            # Extract discriminant value
+            discr_match = re.search(r'\$discr\$ = (\d+)', output)
+            if discr_match:
+                discr_value = int(discr_match.group(1))
+                
+                # Map common Rust enum discriminants
+                variant_names = {
+                    # Common Option/Result variants
+                    0: "None/Ok",
+                    1: "Some/Err",
+                    # For other enums, we'd need type info
+                }
+                
+                # Use provided hints if available
+                if enum_hints and discr_value in enum_hints:
+                    variant_name = enum_hints[discr_value]
+                elif discr_value in variant_names:
+                    variant_name = variant_names[discr_value]
+                else:
+                    variant_name = f"variant_{discr_value}"
+                
+                output = re.sub(r'\$discr\$ = \d+', f'variant: {variant_name}', output)
         
         return output
-    except:
+    except Exception as e:
+        logger.debug(f"Pretty-printing failed: {e}")
         # If pretty-printing fails, return original
         return raw_output
 
@@ -945,9 +984,22 @@ async def set_breakpoint(
     )
     session.breakpoints[breakpoint_id] = bp
     
+    # Parse the actual location from the output to get resolved path
+    resolved_location = ""
+    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+        # GDB: "Breakpoint 1 at 0x1234: file src/main.rs, line 42."
+        loc_match = re.search(r"file (.+), line (\d+)", output)
+        if loc_match:
+            resolved_location = f"{loc_match.group(1)}:{loc_match.group(2)}"
+    else:  # LLDB
+        # LLDB: "Breakpoint 1: where = ... at src/main.rs:42"
+        loc_match = re.search(r" at ([^:]+):(\d+)", output)
+        if loc_match:
+            resolved_location = f"{loc_match.group(1)}:{loc_match.group(2)}"
+    
     return {
         "breakpoint_id": breakpoint_id,
-        "location": f"{file}:{line}" if file and line else function,
+        "location": resolved_location or (f"{file}:{line}" if file and line else function),
         "status": "set"
     }
 
@@ -1084,30 +1136,55 @@ async def run(
     # Log output for debugging
     logger.debug(f"Run/continue output: {output}")
     
-    if "Breakpoint" in output:
+    # Check various stop conditions
+    if "Breakpoint" in output or "breakpoint" in output:
         stop_reason = "breakpoint"
         session.state = DebuggerState.PAUSED
-        # Extract breakpoint number if available
-        bp_match = re.search(r"Breakpoint (\d+)", output)
-        if bp_match:
-            stop_reason = f"breakpoint_{bp_match.group(1)}"
+        
+        # Extract breakpoint number
+        if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+            bp_match = re.search(r"Breakpoint (\d+)", output)
+            if bp_match:
+                stop_reason = f"breakpoint_{bp_match.group(1)}"
+        else:  # LLDB
+            # LLDB format: "stop reason = breakpoint 1.1"
+            reason_match = re.search(r"stop reason = breakpoint (\d+)", output)
+            if reason_match:
+                stop_reason = f"breakpoint_{reason_match.group(1)}"
+            else:
+                # Alternative: "Breakpoint N: ..."
+                bp_match = re.search(r"Breakpoint (\d+):", output)
+                if bp_match:
+                    stop_reason = f"breakpoint_{bp_match.group(1)}"
         
         # Extract location
         if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
             match = GDB_CURRENT_LOCATION_PATTERN.search(output)
             if match:
                 stopped_at = f"{match.group(3)}:{match.group(4)}"
-        else:
-            match = LLDB_CURRENT_LOCATION_PATTERN.search(output)
+        else:  # LLDB
+            # Try multiple patterns for LLDB
+            # Pattern 1: frame #0: ... at file:line
+            match = re.search(r"frame #0:.*? at ([^:]+):(\d+)", output)
             if match:
-                stopped_at = f"{match.group(2)}:{match.group(3)}"
+                stopped_at = f"{match.group(1)}:{match.group(2)}"
+            else:
+                # Pattern 2: Standard location pattern
+                match = LLDB_CURRENT_LOCATION_PATTERN.search(output)
+                if match:
+                    stopped_at = f"{match.group(2)}:{match.group(3)}"
+    
     elif "Program exited" in output or "Process exited" in output or "exited with" in output:
         stop_reason = "exited"
         session.state = DebuggerState.FINISHED
         # Try to extract exit code
         exit_match = re.search(r"exited (?:with code|normally) \[(\d+)\]", output)
+        if not exit_match:
+            # LLDB format: "Process N exited with status = N"
+            exit_match = re.search(r"exited with status = (\d+)", output)
         if exit_match:
             stop_reason = f"exited_code_{exit_match.group(1)}"
+    
     elif "received signal" in output or "signal" in output.lower():
         stop_reason = "signal"
         session.state = DebuggerState.PAUSED
@@ -1117,13 +1194,39 @@ async def run(
             stop_reason = "abort"
         elif "SIGINT" in output:
             stop_reason = "interrupted"
-    elif "panic" in output.lower():
+    
+    elif "panic" in output.lower() or "rust_panic" in output:
         stop_reason = "panic"
         session.state = DebuggerState.PAUSED
+    
+    # If we're still at unknown but paused, check for LLDB stop reason
+    if stop_reason == "unknown" and session.state == DebuggerState.PAUSED:
+        reason_match = re.search(r"stop reason = (.+)", output)
+        if reason_match:
+            reason_text = reason_match.group(1).strip()
+            if "step" in reason_text:
+                stop_reason = "step"
+            elif "breakpoint" in reason_text:
+                stop_reason = "breakpoint"
+            else:
+                stop_reason = reason_text
     
     # Update session tracking
     session.last_stop_reason = stop_reason
     session.current_location = stopped_at if stopped_at else session.current_location
+    
+    # If we found a location but not through normal means, update it
+    if not stopped_at and session.state == DebuggerState.PAUSED:
+        # Try to get current location with a separate command
+        try:
+            if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+                frame_output = debug_client._send_command(session, "frame info")
+                frame_match = re.search(r" at ([^:]+):(\d+)", frame_output)
+                if frame_match:
+                    stopped_at = f"{frame_match.group(1)}:{frame_match.group(2)}"
+                    session.current_location = stopped_at
+        except:
+            pass
     
     # Handle pagination
     pagination = paginate_text(output, limit, offset)
@@ -1627,17 +1730,34 @@ async def print_variable(
     session = debug_client.sessions[session_id]
     
     # Send print command
-    output = debug_client._send_command(session, f"print {expression}")
+    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+        output = debug_client._send_command(session, f"print {expression}")
+        # Get type info separately
+        type_output = debug_client._send_command(session, f"ptype {expression}")
+    else:  # LLDB
+        # For LLDB, use expression with -T to get type and value together, then parse
+        combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
+        
+        # Split type from value for LLDB
+        # LLDB format: (type) $N = value
+        type_match = re.match(r'^\(([^)]+)\)', combined_output)
+        if type_match:
+            type_output = f"type = {type_match.group(1)}"
+            # Extract just the value part
+            value_part = combined_output[type_match.end():].strip()
+            # Remove the $N = prefix if present
+            value_match = re.match(r'\$\d+\s*=\s*', value_part)
+            if value_match:
+                output = value_part[value_match.end():]
+            else:
+                output = value_part
+        else:
+            # Fallback if parsing fails
+            output = combined_output
+            type_output = "type = unknown"
     
     # Pretty-print the output for better readability
     pretty_output = pretty_print_rust_value(output)
-    
-    # Also get type info
-    type_output = ""
-    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-        type_output = debug_client._send_command(session, f"ptype {expression}")
-    else:  # LLDB
-        type_output = debug_client._send_command(session, f"expression -T -- {expression}")
     
     # Paginate both outputs
     value_pagination = paginate_text(pretty_output, limit, offset)
@@ -1872,6 +1992,65 @@ async def get_test_summary(session_id: str) -> Dict[str, Any]:
             }
     
     return summary
+
+
+@mcp.tool()
+async def get_enum_info(session_id: str, type_name: str) -> Dict[str, Any]:
+    """Get information about an enum type, including variant names and discriminants.
+    
+    This tool helps with understanding enum types and their variants,
+    which is useful for interpreting discriminant values in debug output.
+    
+    Args:
+        session_id: The session identifier
+        type_name: The enum type name (e.g., "Option<i32>", "MyEnum")
+        
+    Returns:
+        Dictionary with enum variant information
+    """
+    if session_id not in debug_client.sessions:
+        return {"status": "error", "error": "Session not found"}
+    
+    session = debug_client.sessions[session_id]
+    
+    # Try to get enum info
+    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+        # GDB: use ptype
+        output = debug_client._send_command(session, f"ptype {type_name}")
+    else:  # LLDB
+        # LLDB: use type lookup
+        output = debug_client._send_command(session, f"type lookup {type_name}")
+    
+    # Parse enum variants
+    variants = {}
+    
+    # Look for enum variant patterns
+    # Rust enum format in debugger: "variant_name = N"
+    variant_matches = re.findall(r'(\w+)\s*=\s*(\d+)', output)
+    for name, value in variant_matches:
+        variants[int(value)] = name
+    
+    # Also look for enum definitions without explicit values
+    if not variants and "enum" in output:
+        # Extract variant names in order
+        lines = output.split('\n')
+        variant_index = 0
+        for line in lines:
+            line = line.strip()
+            # Skip non-variant lines
+            if not line or line.startswith('{') or line.startswith('}') or '=' in line:
+                continue
+            # Look for variant names (simple identifiers)
+            if re.match(r'^\w+(?:\(|$)', line):
+                variant_name = re.match(r'^(\w+)', line).group(1)
+                variants[variant_index] = variant_name
+                variant_index += 1
+    
+    return {
+        "type_name": type_name,
+        "variants": variants,
+        "raw_output": output
+    }
 
 
 @mcp.tool()

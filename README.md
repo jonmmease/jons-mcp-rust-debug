@@ -332,6 +332,18 @@ Returns:
   test_results: Summary of passed/failed/ignored tests
 ```
 
+#### get_enum_info
+Get enum variant information for better understanding of discriminant values.
+```
+Args:
+  session_id: The session identifier
+  type_name: The enum type name (e.g., "Option<i32>", "MyEnum")
+Returns:
+  type_name: The requested type name
+  variants: Dictionary mapping discriminant values to variant names
+  raw_output: Raw debugger output
+```
+
 #### check_debug_info
 Check debug symbol and source mapping information.
 ```
@@ -410,6 +422,16 @@ await start_debug(
 ## Recent Improvements
 
 Based on user feedback, the following enhancements have been added:
+
+### Latest Updates (Round 2)
+
+1. **Fixed Pretty-Printing Duplication**: Resolved issue where LLDB output was duplicated, now shows clean formatted output
+2. **Enhanced Stop Reason Detection**: Better detection of breakpoint stops in LLDB with "stop reason = breakpoint N" parsing
+3. **Improved Location Tracking**: Current location now properly tracked when stopped at breakpoints
+4. **Enum Variant Support**: New `get_enum_info` tool to lookup enum variant names from discriminant values
+5. **Cleaner Value Display**: Type information separated from value output for cleaner display
+
+### Previous Updates
 
 1. **Enhanced Command Flow**: The `run` command now returns clear action messages indicating what happened (e.g., "Started new execution", "Continued from breakpoint")
 2. **Improved Stop Reasons**: More detailed stop reasons including specific breakpoint numbers and exit codes
