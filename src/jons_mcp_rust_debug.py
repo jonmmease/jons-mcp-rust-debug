@@ -520,7 +520,7 @@ debug_client = RustDebugClient()
 
 # MCP Tools - Session Management
 
-@mcp.tool
+@mcp.tool()
 async def start_debug(target_type: str, target: Optional[str] = None, args: Optional[List[str]] = None) -> Dict[str, Any]:
     """Start a new Rust debugging session.
     
@@ -550,7 +550,7 @@ async def start_debug(target_type: str, target: Optional[str] = None, args: Opti
         }
 
 
-@mcp.tool
+@mcp.tool()
 async def stop_debug(session_id: str) -> Dict[str, Any]:
     """Stop an active debugging session.
     
@@ -570,7 +570,7 @@ async def stop_debug(session_id: str) -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
-@mcp.tool
+@mcp.tool()
 async def list_sessions() -> Dict[str, Any]:
     """List all active debugging sessions.
     
@@ -592,7 +592,7 @@ async def list_sessions() -> Dict[str, Any]:
 
 # MCP Tools - Breakpoint Management
 
-@mcp.tool
+@mcp.tool()
 async def set_breakpoint(
     session_id: str,
     file: Optional[str] = None,
@@ -679,7 +679,7 @@ async def set_breakpoint(
     }
 
 
-@mcp.tool
+@mcp.tool()
 async def remove_breakpoint(session_id: str, breakpoint_id: int) -> Dict[str, Any]:
     """Remove a breakpoint.
     
@@ -712,7 +712,7 @@ async def remove_breakpoint(session_id: str, breakpoint_id: int) -> Dict[str, An
     return {"status": "removed"}
 
 
-@mcp.tool
+@mcp.tool()
 async def list_breakpoints(session_id: str) -> Dict[str, Any]:
     """List all breakpoints in the session.
     
@@ -745,7 +745,7 @@ async def list_breakpoints(session_id: str) -> Dict[str, Any]:
 
 # MCP Tools - Execution Control
 
-@mcp.tool
+@mcp.tool()
 async def run(session_id: str) -> Dict[str, Any]:
     """Start or continue program execution.
     
@@ -802,7 +802,7 @@ async def run(session_id: str) -> Dict[str, Any]:
     }
 
 
-@mcp.tool
+@mcp.tool()
 async def step(session_id: str) -> Dict[str, Any]:
     """Step into the next line of code (enters functions).
     
@@ -851,7 +851,7 @@ async def step(session_id: str) -> Dict[str, Any]:
     }
 
 
-@mcp.tool
+@mcp.tool()
 async def next(session_id: str) -> Dict[str, Any]:
     """Step over the next line of code (doesn't enter functions).
     
@@ -900,7 +900,7 @@ async def next(session_id: str) -> Dict[str, Any]:
     }
 
 
-@mcp.tool
+@mcp.tool()
 async def finish(session_id: str) -> Dict[str, Any]:
     """Continue execution until the current function returns.
     
@@ -934,7 +934,7 @@ async def finish(session_id: str) -> Dict[str, Any]:
 
 # MCP Tools - Stack Navigation
 
-@mcp.tool
+@mcp.tool()
 async def backtrace(session_id: str, limit: Optional[int] = None) -> Dict[str, Any]:
     """Get the current call stack (backtrace).
     
@@ -981,7 +981,7 @@ async def backtrace(session_id: str, limit: Optional[int] = None) -> Dict[str, A
     return {"frames": frames}
 
 
-@mcp.tool
+@mcp.tool()
 async def up(session_id: str, count: int = 1) -> Dict[str, Any]:
     """Move up in the call stack (to caller).
     
@@ -1025,7 +1025,7 @@ async def up(session_id: str, count: int = 1) -> Dict[str, Any]:
     return {"frame": frame_info, "output": output}
 
 
-@mcp.tool
+@mcp.tool()
 async def down(session_id: str, count: int = 1) -> Dict[str, Any]:
     """Move down in the call stack.
     
@@ -1071,7 +1071,7 @@ async def down(session_id: str, count: int = 1) -> Dict[str, Any]:
 
 # MCP Tools - Inspection
 
-@mcp.tool
+@mcp.tool()
 async def list_source(session_id: str, line: Optional[int] = None, count: int = 10) -> Dict[str, Any]:
     """Show source code around current or specified line.
     
@@ -1105,7 +1105,7 @@ async def list_source(session_id: str, line: Optional[int] = None, count: int = 
     }
 
 
-@mcp.tool
+@mcp.tool()
 async def print_variable(session_id: str, expression: str) -> Dict[str, Any]:
     """Print the value of a variable or expression.
     
@@ -1138,7 +1138,7 @@ async def print_variable(session_id: str, expression: str) -> Dict[str, Any]:
     }
 
 
-@mcp.tool
+@mcp.tool()
 async def list_locals(session_id: str) -> Dict[str, Any]:
     """List all local variables in the current scope.
     
@@ -1162,7 +1162,7 @@ async def list_locals(session_id: str) -> Dict[str, Any]:
     return {"locals": output}
 
 
-@mcp.tool
+@mcp.tool()
 async def evaluate(session_id: str, expression: str) -> Dict[str, Any]:
     """Evaluate an arbitrary Rust expression in the current context.
     
