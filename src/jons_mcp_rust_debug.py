@@ -713,7 +713,17 @@ async def run(
     session = debug_client.sessions[session_id]
     
     action_taken = ""
-    if not session.process or not session.process.IsValid():
+    # Check if we need to launch a new process
+    needs_launch = (not session.process or 
+                   not session.process.IsValid() or
+                   session.process.GetState() in (lldb.eStateExited, lldb.eStateDetached))
+    
+    if needs_launch:
+        # Reset state for new launch
+        session.state = DebuggerState.IDLE
+        session.last_stop_reason = ""
+        session.current_location = None
+        
         # Launch the process
         error = lldb.SBError()
         working_dir = os.path.abspath(debug_client.config.working_directory)
@@ -743,6 +753,15 @@ async def run(
         )
         session.event_thread.start()
     else:
+        # Ensure event handler thread is running
+        if not session.event_thread or not session.event_thread.is_alive():
+            session.event_thread = threading.Thread(
+                target=debug_client._event_handler_thread,
+                args=(session,),
+                daemon=True
+            )
+            session.event_thread.start()
+        
         # Continue execution
         error = session.process.Continue()
         if error.Fail():
