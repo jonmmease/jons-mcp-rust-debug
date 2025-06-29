@@ -23,6 +23,8 @@ from enum import Enum
 import logging
 import shutil
 import platform
+import select
+import fcntl
 
 from mcp.server.fastmcp import FastMCP
 
@@ -127,6 +129,8 @@ class DebugSession:
     has_started: bool = False  # Track if program has been started
     last_stop_reason: str = ""  # Track why we stopped
     current_location: Optional[str] = None  # Current file:line
+    pty_master: Optional[int] = None  # PTY master file descriptor for LLDB
+    created_time: float = field(default_factory=time.time)  # Track session creation time
 
 
 class RustDebugClient:
@@ -202,6 +206,12 @@ class RustDebugClient:
                         )
                         return dbg_type, path
 
+        
+        # Check if lldb-mi is available as fallback
+        lldb_mi = shutil.which("lldb-mi")
+        if lldb_mi:
+            logger.info("Found lldb-mi, consider using MI interface for better reliability")
+        
         raise RuntimeError(
             "No debugger found. Please install gdb or lldb, or specify debugger path in rustdebugconfig.json"
         )
@@ -321,31 +331,85 @@ class RustDebugClient:
             prompt = GDB_PROMPT if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB] else LLDB_PROMPT
             prompt_pattern = GDB_PROMPT_PATTERN if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB] else LLDB_PROMPT_PATTERN
             
-            while session.process and session.process.poll() is None:
-                # Read one character at a time to handle prompts without newlines
-                char = session.process.stdout.read(1)
-                if not char:
-                    continue
+            # Handle PTY reading for LLDB
+            if session.pty_master is not None:
+                import select
+                
+                # During initialization, accumulate more output
+                init_period = time.time() < session.created_time + 15.0 if hasattr(session, 'created_time') else False
+                
+                while session.process and session.process.poll() is None:
+                    # Check if data available
+                    ready, _, _ = select.select([session.pty_master], [], [], 0.1)
+                    if ready:
+                        try:
+                            # Read available data
+                            chunk = os.read(session.pty_master, 4096)
+                            if chunk:
+                                # Decode and process
+                                text = chunk.decode('utf-8', errors='replace')
+                                buffer += text
+                                
+                                # During initialization, wait for more complete output
+                                if init_period and prompt in buffer:
+                                    # Wait a bit for more output after prompt
+                                    time.sleep(0.05)
+                                    try:
+                                        extra = os.read(session.pty_master, 1024)
+                                        if extra:
+                                            buffer += extra.decode('utf-8', errors='replace')
+                                    except:
+                                        pass
+                                
+                                # Check for prompts
+                                while prompt in buffer:
+                                    # Find the last complete prompt
+                                    idx = buffer.rfind(prompt)
+                                    if idx >= 0:
+                                        # Output everything before the last prompt
+                                        if idx > 0:
+                                            output = buffer[:idx]
+                                            session.output_queue.put(output)
+                                            session.last_output += output
+                                        session.state = DebuggerState.PAUSED
+                                        # Signal prompt found
+                                        session.output_queue.put("")
+                                        # Keep rest after prompt for next iteration
+                                        buffer = buffer[idx + len(prompt):]
+                                        break
+                                        
+                        except (OSError, IOError) as e:
+                            if e.errno == 5:  # I/O error - PTY closed
+                                break
+                            logger.debug(f"PTY read error: {e}")
+                            
+            else:
+                # Regular pipe reading for GDB
+                while session.process and session.process.poll() is None:
+                    # Read one character at a time to handle prompts without newlines
+                    char = session.process.stdout.read(1)
+                    if not char:
+                        continue
 
-                buffer += char
+                    buffer += char
 
-                # If we hit a newline, send the complete line
-                if char == "\n":
-                    session.output_queue.put(buffer)
-                    session.last_output += buffer
-                    buffer = ""
-                # Check if we have a prompt
-                elif buffer.endswith(prompt):
-                    session.output_queue.put(buffer)
-                    session.last_output += buffer
-                    session.state = DebuggerState.PAUSED
-                    buffer = ""
+                    # If we hit a newline, send the complete line
+                    if char == "\n":
+                        session.output_queue.put(buffer)
+                        session.last_output += buffer
+                        buffer = ""
+                    # Check if we have a prompt
+                    elif buffer.endswith(prompt):
+                        session.output_queue.put(buffer)
+                        session.last_output += buffer
+                        session.state = DebuggerState.PAUSED
+                        buffer = ""
 
-                # Check for state changes
-                if "Program exited" in session.last_output or "Process exited" in session.last_output:
-                    session.state = DebuggerState.FINISHED
-                elif "Program received signal" in session.last_output:
-                    session.state = DebuggerState.PAUSED
+            # Check for state changes
+            if "Program exited" in session.last_output or "Process exited" in session.last_output:
+                session.state = DebuggerState.FINISHED
+            elif "Program received signal" in session.last_output:
+                session.state = DebuggerState.PAUSED
 
             # Send any remaining buffer content
             if buffer:
@@ -363,8 +427,14 @@ class RustDebugClient:
                     command = session.command_queue.get(timeout=0.1)
                     if command:
                         logger.debug(f"Sending command to debugger: {command}")
-                        session.process.stdin.write(command + "\n")
-                        session.process.stdin.flush()
+                        
+                        if session.pty_master is not None:
+                            # Write to PTY
+                            os.write(session.pty_master, (command + "\n").encode('utf-8'))
+                        else:
+                            # Write to regular pipe
+                            session.process.stdin.write(command + "\n")
+                            session.process.stdin.flush()
                 except queue.Empty:
                     continue
         except Exception as e:
@@ -413,23 +483,62 @@ class RustDebugClient:
         """Update session stop information from debugger output"""
         # For LLDB, check for stop reason in output
         if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
-            # Check for stop reason
-            reason_match = re.search(r"stop reason = (.+)", output)
-            if reason_match:
-                reason = reason_match.group(1).strip()
-                if "breakpoint" in reason:
-                    # Extract breakpoint number
-                    bp_match = re.search(r"breakpoint (\d+)", reason)
-                    if bp_match:
-                        session.last_stop_reason = f"breakpoint_{bp_match.group(1)}"
+            # First check if process stopped at all
+            process_stopped = re.search(r"Process \d+ stopped", output)
+            if process_stopped:
+                session.state = DebuggerState.PAUSED
+                
+                # Now look for explicit stop reason in multiple patterns
+                # Pattern 1: Direct stop reason
+                reason_match = re.search(r"stop reason = (.+?)(?:\r?\n|$)", output)
+                if not reason_match:
+                    # Pattern 2: In thread info format
+                    reason_match = re.search(r", stop reason = (.+?)(?:\r?\n|$)", output)
+                
+                if reason_match:
+                    reason = reason_match.group(1).strip()
+                    if "breakpoint" in reason:
+                        # Extract breakpoint number
+                        bp_match = re.search(r"breakpoint (\d+(?:\.\d+)?)", reason)
+                        if bp_match:
+                            session.last_stop_reason = f"breakpoint_{bp_match.group(1).replace('.', '_')}"
+                        else:
+                            session.last_stop_reason = "breakpoint"
                     else:
-                        session.last_stop_reason = "breakpoint"
-                    session.state = DebuggerState.PAUSED
+                        session.last_stop_reason = reason
                 else:
-                    session.last_stop_reason = reason
-                    session.state = DebuggerState.PAUSED
+                    # Process stopped but no explicit reason - check context
+                    if "thread #" in output and "stop reason" not in output:
+                        # Stopped but no reason given - likely at entry or after step
+                        if not session.has_started:
+                            session.last_stop_reason = "entry"
+                        else:
+                            session.last_stop_reason = "step"
+                    else:
+                        session.last_stop_reason = "stopped"
             
-            # Update location
+            # Update location - try multiple patterns
+            # Pattern 1: at file:line
+            loc_match = re.search(r" at ([^:]+):(\d+)", output)
+            if loc_match:
+                session.current_location = f"{loc_match.group(1)}:{loc_match.group(2)}"
+            else:
+                # Pattern 2: frame info format
+                frame_match = re.search(r"frame #\d+:.*?`.*? at ([^:]+):(\d+)", output)
+                if frame_match:
+                    session.current_location = f"{frame_match.group(1)}:{frame_match.group(2)}"
+        
+        # Also check for GDB stop reasons
+        elif session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+            if "Breakpoint" in output:
+                bp_match = re.search(r"Breakpoint (\d+)", output)
+                if bp_match:
+                    session.last_stop_reason = f"breakpoint_{bp_match.group(1)}"
+                else:
+                    session.last_stop_reason = "breakpoint"
+                session.state = DebuggerState.PAUSED
+            
+            # Check for location in GDB format
             loc_match = re.search(r" at ([^:]+):(\d+)", output)
             if loc_match:
                 session.current_location = f"{loc_match.group(1)}:{loc_match.group(2)}"
@@ -448,19 +557,49 @@ class RustDebugClient:
         # Clear any pending output first
         self._clear_output_buffer(session)
         
-        # Send command
-        session.command_queue.put(command)
-        
-        if not wait_for_response:
-            return ""
+        # Send command with proper handling for LLDB
+        # For LLDB, we need to ensure clean command transmission
+        if session.pty_master is not None and session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+            # Send directly to PTY with proper line ending
+            command_bytes = (command + '\r\n').encode('utf-8')
+            os.write(session.pty_master, command_bytes)
+            os.fsync(session.pty_master)  # Force flush
+            
+            # Give LLDB time to process the command
+            time.sleep(0.05)
+        else:
+            # Regular queue-based sending
+            session.command_queue.put(command)
         
         # Wait for prompt with custom timeout
         if not self._wait_for_prompt(session, timeout=timeout):
+            # For LLDB, sometimes we get output without a prompt
+            if session.last_output and session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+                # Return what we have
+                return session.last_output.strip()
             raise TimeoutError(f"Timeout waiting for debugger response to command: {command}")
         
-        # Return the output (excluding the prompt)
+        # Return the output (excluding the prompt and command echo)
         prompt = GDB_PROMPT if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB] else LLDB_PROMPT
         output = session.last_output.replace(prompt, "").strip()
+        
+        # Remove command echo if present
+        lines = output.split('\n')
+        filtered_lines = []
+        skip_echo = True
+        
+        for i, line in enumerate(lines):
+            # Skip the command echo (first occurrence of the command)
+            if skip_echo and line.strip() == command:
+                skip_echo = False
+                continue
+            
+            # Skip empty lines immediately after echo
+            if not skip_echo and line.strip():
+                filtered_lines.append(line)
+        
+        output = '\n'.join(filtered_lines).strip()
+        
         return output
 
     def create_session(self, target_type: str, target: str, args: List[str], 
@@ -492,16 +631,49 @@ class RustDebugClient:
             
             logger.info(f"Starting debugger: {' '.join(cmd)}")
             
-            session.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,  # Separate stderr to avoid mixing with stdout
-                text=True,
-                bufsize=0,
-                cwd=self.config.working_directory,
-                env={**os.environ, **self.config.environment}
-            )
+            # Use PTY for LLDB on macOS/Unix systems
+            if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB] and hasattr(os, 'openpty'):
+                import pty
+                
+                # Create pseudo-terminal with proper settings for LLDB
+                import pty
+                import termios
+                import tty
+                
+                master_fd, slave_fd = pty.openpty()
+                
+                # Configure the PTY for LLDB - disable echo and set proper modes
+                # This prevents command echoing issues
+                attrs = termios.tcgetattr(slave_fd)
+                # Disable echo (ECHO), canonical mode (ICANON), and signals (ISIG)
+                attrs[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG)
+                # Set VMIN and VTIME for non-blocking reads
+                attrs[6][termios.VMIN] = 0
+                attrs[6][termios.VTIME] = 0
+                termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+                
+                # Store master fd for reading/writing
+                session.pty_master = master_fd
+                
+                # Make non-blocking
+                import fcntl
+                flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+                fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                
+                logger.info("Using PTY for LLDB communication")
+            else:
+                # Regular pipes for GDB
+                session.process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,  # Separate stderr to avoid mixing with stdout
+                    text=True,
+                    bufsize=0,
+                    cwd=self.config.working_directory,
+                    env={**os.environ, **self.config.environment}
+                )
+                session.pty_master = None
             
             # Start reader and writer threads
             session.reader_thread = threading.Thread(
@@ -530,19 +702,73 @@ class RustDebugClient:
                 session.process.terminate()
                 raise RuntimeError("Failed to get initial debugger prompt")
             
-            # For rust-lldb, consume any initialization output (type formatters, etc.)
+            # For rust-lldb, handle initialization differently with PTY
             if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
-                # Give it a moment to finish initialization
-                time.sleep(0.5)
-                self._clear_output_buffer(session)
-                
-                # Send a simple command to ensure we're ready
-                try:
-                    test_output = self._send_command(session, "version")
-                    logger.debug(f"LLDB version check: {test_output}")
-                except:
-                    # If version command fails, just continue
-                    pass
+                if session.pty_master is not None:
+                    # With PTY, we need to wait for initialization to complete
+                    # rust-lldb runs many initialization commands
+                    logger.info("Waiting for LLDB initialization...")
+                    
+                    # Collect all initialization output
+                    init_output = ""
+                    init_start_time = time.time()
+                    prompt_count = 0
+                    last_prompt_time = 0
+                    
+                    # Wait for initialization prompts
+                    # LLDB runs many commands during init, we need to wait for them all
+                    while time.time() - init_start_time < 10.0:
+                        try:
+                            output = session.output_queue.get(timeout=0.5)
+                            init_output += output
+                            
+                            # Count prompts
+                            new_prompts = output.count(LLDB_PROMPT)
+                            if new_prompts > 0:
+                                prompt_count += new_prompts
+                                last_prompt_time = time.time()
+                                
+                            # Check if initialization is complete by looking for specific patterns
+                            if "Executing commands in" in output and ".lldbinit" in output:
+                                # Still initializing
+                                continue
+                            
+                            # If we see the type formatters being added, we're still initializing
+                            if "type summary add" in output or "type synthetic add" in output:
+                                continue
+                                
+                        except queue.Empty:
+                            # Check if we've seen enough prompts and they've stopped coming
+                            if prompt_count >= 5 and time.time() - last_prompt_time > 1.0:
+                                # Additional check: send a test command to verify readiness
+                                test_cmd = "script print('ready')"
+                                os.write(session.pty_master, (test_cmd + '\r\n').encode())
+                                time.sleep(0.2)
+                                
+                                # Try to read the response
+                                try:
+                                    test_chunk = os.read(session.pty_master, 1024)
+                                    if b'ready' in test_chunk:
+                                        break
+                                except:
+                                    pass
+                    
+                    logger.info(f"LLDB initialization complete after {prompt_count} prompts")
+                    
+                    # Clear the output buffer after initialization
+                    self._clear_output_buffer(session)
+                    
+                    # Now send a test command to ensure we're ready
+                    try:
+                        test_output = self._send_command(session, "version", timeout=2.0)
+                        if "lldb" in test_output.lower():
+                            logger.debug("LLDB ready - version command successful")
+                    except:
+                        logger.warning("LLDB may not be fully initialized")
+                else:
+                    # Regular pipe behavior
+                    time.sleep(0.5)
+                    self._clear_output_buffer(session)
             
             # Initialize debugger settings
             if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
@@ -556,10 +782,25 @@ class RustDebugClient:
                 self._send_command(session, "set demangle-style rust")
             else:
                 # LLDB settings
+                # CRITICAL: Prevent LLDB from sharing terminal with inferior
+                self._send_command(session, "settings set target.input-path /dev/null")
+                self._send_command(session, "settings set target.output-path /dev/null")
+                self._send_command(session, "settings set target.error-path /dev/null")
+                
+                # Disable syntax highlighting and other terminal features
+                self._send_command(session, "settings set use-color false")
+                self._send_command(session, "settings set prompt '(lldb) '")
+                self._send_command(session, "settings set stop-line-count-before 0")
+                self._send_command(session, "settings set stop-line-count-after 0")
+                
+                # Set async mode for better command handling
+                self._send_command(session, "settings set target.async true")
+                
+                # Original settings
                 self._send_command(session, "settings set target.process.thread.step-avoid-regexp '^std::'")
                 self._send_command(session, "settings set target.process.thread.step-in-avoid-code std")
-            
-            # Set breakpoint on rust_panic to catch panics
+                
+                # Set breakpoint on rust_panic to catch panics
             if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
                 self._send_command(session, "break rust_panic")
             else:
@@ -624,6 +865,13 @@ class RustDebugClient:
             logger.error(f"Error stopping session {session_id}: {e}")
             if session.process:
                 session.process.kill()
+        
+        # Close PTY if used
+        if session.pty_master is not None:
+            try:
+                os.close(session.pty_master)
+            except:
+                pass
         
         del self.sessions[session_id]
 
@@ -1156,9 +1404,41 @@ async def run(
     # Use longer timeout for run commands as they might take time
     output = debug_client._send_command(session, cmd, timeout=30.0)
     
-    # Parse stop reason
-    stop_reason = "unknown"
-    stopped_at = ""
+    # Update stop info first - this will parse stop reasons and locations
+    debug_client._update_stop_info(session, output)
+    
+    # For LLDB, if we still don't have a stop reason, try getting it from bt
+    if (session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB] and 
+        session.state == DebuggerState.PAUSED and
+        (not session.last_stop_reason or session.last_stop_reason == "unknown")):
+        
+        # Get backtrace which often contains stop reason
+        try:
+            bt_output = debug_client._send_command(session, "bt", timeout=2.0)
+            debug_client._update_stop_info(session, bt_output)
+        except:
+            pass
+    
+    # Special handling for LLDB: if we stopped at assembly main, step into Rust main
+    if (session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB] and 
+        session.state == DebuggerState.PAUSED and
+        "frame #0:" in output and "sample_program`main:" in output and
+        not " at " in output):  # No source location means we're at assembly
+        
+        logger.info("Detected stop at assembly entry point, stepping into Rust main")
+        
+        # Step a few times to get into actual Rust code
+        for _ in range(3):
+            step_output = debug_client._send_command(session, "step", timeout=2.0)
+            if " at " in step_output and ".rs:" in step_output:
+                # We've reached Rust source code
+                output = step_output
+                debug_client._update_stop_info(session, step_output)
+                break
+    
+    # Use the parsed values as defaults
+    stop_reason = session.last_stop_reason if session.last_stop_reason else "unknown"
+    stopped_at = session.current_location if session.current_location else ""
     
     # Log output for debugging
     logger.debug(f"Run/continue output: {output}")
@@ -1707,6 +1987,22 @@ async def list_source(
     
     session = debug_client.sessions[session_id]
     
+    # For LLDB, ensure we're in the right context
+    if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+        # First check our current location
+        frame_info = debug_client._send_command(session, "frame info", timeout=1.0)
+        
+        # If we're at assembly level, try to get source differently
+        if " at " not in frame_info:
+            # Try stepping if we haven't yet
+            if "sample_program`main:" in frame_info:
+                logger.info("At assembly level in list_source, attempting to step")
+                for _ in range(3):
+                    step_output = debug_client._send_command(session, "step", timeout=2.0)
+                    if " at " in step_output and ".rs:" in step_output:
+                        frame_info = debug_client._send_command(session, "frame info", timeout=1.0)
+                        break
+    
     # Send list command
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
         if line:
@@ -1714,32 +2010,107 @@ async def list_source(
         else:
             cmd = "list"
     else:  # LLDB
-        # For LLDB, we need to ensure we have a valid context
+        # For LLDB, first ensure we have proper context
+        if session.state != DebuggerState.PAUSED:
+            return {
+                "source": "",
+                "current_line": None,
+                "pagination": {
+                    "total_chars": 0,
+                    "offset": 0,
+                    "limit": limit,
+                    "has_more": False
+                },
+                "error": "Debugger must be paused to list source"
+            }
+        
+        # Try different approaches for LLDB
         if line:
             cmd = f"source list -l {line} -c {count}"
         else:
-            # If no line specified, list around current location
-            if session.current_frame and session.current_frame.line > 0:
-                cmd = f"source list -l {session.current_frame.line} -c {count}"
-            else:
-                # Try to list from current frame
-                cmd = f"source list -c {count}"
+            cmd = f"source list -c {count}"
     
     output = debug_client._send_command(session, cmd)
     
-    # If LLDB returns minimal output, try alternative commands
-    if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB] and len(output.strip()) < 50:
-        # Try getting current file and line first
-        frame_info = debug_client._send_command(session, "frame info")
-        file_match = re.search(r' at ([^:]+):(\d+)', frame_info)
-        if file_match:
-            file_path = file_match.group(1)
-            line_num = int(file_match.group(2)) if not line else line
-            # Try with explicit file
-            cmd = f"source list -f {file_path} -l {line_num} -c {count}"
-            alt_output = debug_client._send_command(session, cmd)
-            if len(alt_output.strip()) > len(output.strip()):
-                output = alt_output
+    # Log the output for debugging
+    logger.info(f"Source list command '{cmd}' output: {repr(output[:200])}")
+    
+    # Check if output is empty, just the command, or an error
+    if not output or output.strip() == cmd or output.strip() == "source list" or len(output.strip()) < 10:
+        logger.warning(f"Source list returned minimal output: {repr(output)}")
+        
+        # For LLDB, try alternative approaches
+        if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+            # First, ensure we have correct file and line info
+            frame_info = debug_client._send_command(session, "frame info")
+            logger.info(f"Frame info for source context: {repr(frame_info[:200])}")
+            
+            # Try to extract file and line from frame info
+            file_match = re.search(r' at ([^:]+):(\d+)', frame_info)
+            if file_match:
+                file_path = file_match.group(1)
+                target_line = int(file_match.group(2)) if not line else line
+                
+                # Make sure we have an absolute path
+                if not file_path.startswith('/'):
+                    # Try to resolve relative path
+                    abs_path = os.path.abspath(os.path.join(debug_client.config.working_directory, file_path))
+                    if os.path.exists(abs_path):
+                        file_path = abs_path
+                
+                # Try multiple source list variants
+                attempts = [
+                    f"source list -f {file_path} -l {target_line} -c {count}",
+                    f"source list -f \"{file_path}\" -l {target_line} -c {count}",
+                    f"source list -n main -c {count}",  # Try by function name as fallback
+                    f"source info"  # Get source info as diagnostic
+                ]
+                
+                for attempt_cmd in attempts:
+                    logger.info(f"Trying alternative command: {attempt_cmd}")
+                    alt_output = debug_client._send_command(session, attempt_cmd)
+                    if alt_output and len(alt_output.strip()) > len(output.strip()) and "error" not in alt_output.lower():
+                        output = alt_output
+                        logger.info(f"Alternative command succeeded with output length: {len(alt_output)}")
+                        break
+                    else:
+                        logger.info(f"Alternative command failed or returned minimal output: {repr(alt_output[:100])}")
+    
+    # Final fallback: if we still have no source, try reading the file directly
+    if (not output or len(output.strip()) < 10) and session.current_frame and session.current_frame.file:
+        try:
+            file_path = session.current_frame.file
+            if not file_path.startswith('/'):
+                file_path = os.path.join(debug_client.config.working_directory, file_path)
+            
+            if os.path.exists(file_path):
+                logger.info(f"Reading source directly from file: {file_path}")
+                with open(file_path, 'r') as f:
+                    lines = f.readlines()
+                    
+                # Determine line range
+                if line:
+                    center_line = line
+                elif session.current_frame:
+                    center_line = session.current_frame.line
+                else:
+                    center_line = 1
+                
+                # Calculate range
+                start = max(1, center_line - count // 2)
+                end = min(len(lines), start + count)
+                
+                # Format output similar to debugger
+                output_lines = []
+                for i in range(start, end + 1):
+                    if i <= len(lines):
+                        prefix = "=>" if i == center_line else "  "
+                        output_lines.append(f"{prefix} {i:4d}   {lines[i-1].rstrip()}")
+                
+                output = "\n".join(output_lines)
+                logger.info(f"Successfully read {len(output_lines)} lines from file")
+        except Exception as e:
+            logger.error(f"Failed to read source file directly: {e}")
     
     # Handle pagination
     pagination = paginate_text(output, limit, offset)
@@ -1761,7 +2132,8 @@ async def print_variable(
     session_id: str, 
     expression: str,
     limit: Optional[int] = None,
-    offset: Optional[int] = None
+    offset: Optional[int] = None,
+    depth: Optional[int] = None
 ) -> Dict[str, Any]:
     """Print the value of a variable or expression.
     
@@ -1770,6 +2142,7 @@ async def print_variable(
         expression: Variable name or expression to evaluate
         limit: Maximum number of characters to return (for pagination)
         offset: Starting character position (for pagination)
+        depth: Maximum depth for nested structures (LLDB only, default is 1)
         
     Returns:
         Dictionary with the value, type, and pagination info
@@ -1792,84 +2165,93 @@ async def print_variable(
             }
         }
     
-    # Send print command
+    # First check if we're in a valid debugging context
+    if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+        # Make sure we have valid context by checking frame
+        frame_check = debug_client._send_command(session, "frame info", timeout=1.0)
+        if "sample_program`main:" in frame_check and " at " not in frame_check:
+            # We're at assembly level, try to step into Rust code
+            logger.info("At assembly level, attempting to step into Rust code")
+            for _ in range(3):
+                step_output = debug_client._send_command(session, "step", timeout=2.0)
+                if " at " in step_output and ".rs:" in step_output:
+                    break
+    
+    # Send print command with depth support
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+        # GDB supports print settings for depth
+        if depth is not None:
+            # Save current settings
+            old_depth = debug_client._send_command(session, "show print max-depth")
+            # Set new depth
+            debug_client._send_command(session, f"set print max-depth {depth}")
+        
         output = debug_client._send_command(session, f"print {expression}")
         # Get type info separately
         type_output = debug_client._send_command(session, f"ptype {expression}")
+        
+        # Restore depth setting if changed
+        if depth is not None:
+            # Extract old value and restore
+            match = re.search(r"is (\d+)", old_depth)
+            if match:
+                debug_client._send_command(session, f"set print max-depth {match.group(1)}")
     else:  # LLDB
-        # Try multiple approaches for LLDB
-        try:
-            # First try frame variable for simple variables
-            if re.match(r'^\w+$', expression):  # Simple variable name
-                frame_var_output = debug_client._send_command(session, f"frame variable {expression}")
-                if frame_var_output and "error" not in frame_var_output.lower():
-                    # Parse frame variable output: "(type) name = value"
-                    match = re.match(r'^\(([^)]+)\)\s*\w+\s*=\s*(.+)', frame_var_output.strip())
-                    if match:
-                        type_output = f"type = {match.group(1)}"
-                        output = match.group(2)
-                    else:
-                        # Try expression as fallback
-                        combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
-                        # Parse expression output
-                        type_match = re.match(r'^\(([^)]+)\)', combined_output)
-                        if type_match:
-                            type_output = f"type = {type_match.group(1)}"
-                            value_part = combined_output[type_match.end():].strip()
-                            value_match = re.match(r'\$\d+\s*=\s*', value_part)
-                            if value_match:
-                                output = value_part[value_match.end():]
-                            else:
-                                output = value_part
-                        else:
-                            output = combined_output
-                            type_output = "type = unknown"
+        # For LLDB, try frame variable first for simple variables
+        if re.match(r'^\w+$', expression) and not expression.startswith('*'):
+            # Simple variable name
+            output = debug_client._send_command(session, f"frame variable {expression}")
+            if output and "error" not in output.lower() and len(output.strip()) > 0:
+                # Parse frame variable output: (type) name = value
+                match = re.match(r'^\(([^)]+)\)\s*\w+\s*=\s*(.+)', output.strip(), re.DOTALL)
+                if match:
+                    type_output = f"type = {match.group(1)}"
+                    output = match.group(2).strip()
                 else:
-                    # Fall back to expression
-                    combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
-                    type_match = re.match(r'^\(([^)]+)\)', combined_output)
-                    if type_match:
-                        type_output = f"type = {type_match.group(1)}"
-                        value_part = combined_output[type_match.end():].strip()
-                        value_match = re.match(r'\$\d+\s*=\s*', value_part)
-                        if value_match:
-                            output = value_part[value_match.end():]
-                        else:
-                            output = value_part
-                    else:
-                        output = combined_output
-                        type_output = "type = unknown"
+                    type_output = "type = unknown"
             else:
-                # Complex expression, use expression command
-                combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
-                type_match = re.match(r'^\(([^)]+)\)', combined_output)
+                # Fallback to expression
+                output = debug_client._send_command(session, f"expression -- {expression}")
+                type_output = "type = unknown"
+        else:
+            # Complex expression or dereference
+            if expression.startswith('*'):
+                # For dereference, try p command first
+                p_output = debug_client._send_command(session, f"p {expression}")
+                if p_output and "error" not in p_output.lower():
+                    output = p_output
+                else:
+                    # Try frame variable with dereference
+                    output = debug_client._send_command(session, f"frame variable {expression}")
+                    if not output or "error" in output.lower():
+                        # Last resort
+                        output = debug_client._send_command(session, f"expression -- {expression}")
+            else:
+                # Regular expression
+                output = debug_client._send_command(session, f"expression -- {expression}")
+            
+            # Try to get type information
+            if output and "error" not in output.lower():
+                # Try to extract type from output
+                type_match = re.match(r'^\(([^)]+)\)', output)
                 if type_match:
                     type_output = f"type = {type_match.group(1)}"
-                    value_part = combined_output[type_match.end():].strip()
-                    value_match = re.match(r'\$\d+\s*=\s*', value_part)
-                    if value_match:
-                        output = value_part[value_match.end():]
-                    else:
-                        output = value_part
                 else:
-                    output = combined_output
                     type_output = "type = unknown"
-        except Exception as e:
-            logger.error(f"Error printing variable: {e}")
-            output = ""
-            type_output = "type = unknown"
+            else:
+                type_output = "type = unknown"
     
-    # Log raw output for debugging
-    logger.info(f"Print variable raw output: {repr(output[:200])}")
-    logger.info(f"Print variable type output: {repr(type_output[:200])}")
+    # Parse the output to extract value and type if needed
+    value_text = output.strip()
+    type_text = type_output.strip()
     
-    # Pretty-print the output for better readability
-    pretty_output = pretty_print_rust_value(output)
+    # Remove command echo if present
+    if value_text.startswith(expression):
+        value_text = value_text[len(expression):].strip()
     
-    # Paginate both outputs
-    value_pagination = paginate_text(pretty_output, limit, offset)
-    type_pagination = paginate_text(type_output, limit, offset)
+    # Handle pagination for value and type
+    value_pagination = paginate_text(value_text, limit, offset)
+    type_pagination = paginate_text(type_text, limit, offset)
     
     return {
         "value": value_pagination["content"],
@@ -1890,448 +2272,3 @@ async def print_variable(
             }
         }
     }
-
-
-@mcp.tool()
-async def list_locals(
-    session_id: str,
-    limit: Optional[int] = None,
-    offset: Optional[int] = None
-) -> Dict[str, Any]:
-    """List all local variables in the current scope.
-    
-    Args:
-        session_id: The session identifier
-        limit: Maximum number of characters to return (for pagination)
-        offset: Starting character position (for pagination)
-        
-    Returns:
-        Dictionary with local variables and pagination info
-    """
-    if session_id not in debug_client.sessions:
-        return {"status": "error", "error": "Session not found"}
-    
-    session = debug_client.sessions[session_id]
-    
-    # Send info locals command
-    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-        output = debug_client._send_command(session, "info locals")
-    else:  # LLDB
-        output = debug_client._send_command(session, "frame variable")
-    
-    # Handle pagination
-    pagination = paginate_text(output, limit, offset)
-    
-    return {
-        "locals": pagination["content"],
-        "pagination": {
-            "total_chars": pagination["total_chars"],
-            "offset": pagination["offset"],
-            "limit": pagination["limit"],
-            "has_more": pagination["has_more"]
-        }
-    }
-
-
-@mcp.tool()
-async def check_debug_info(
-    session_id: str,
-    limit: Optional[int] = None,
-    offset: Optional[int] = None
-) -> Dict[str, Any]:
-    """Check debug symbol and source mapping information.
-    
-    Args:
-        session_id: The session identifier
-        limit: Maximum number of characters to return per field (for pagination)
-        offset: Starting character position (for pagination)
-        
-    Returns:
-        Dictionary with debug information and pagination info
-    """
-    if session_id not in debug_client.sessions:
-        return {"status": "error", "error": "Session not found"}
-    
-    session = debug_client.sessions[session_id]
-    
-    info = {}
-    pagination_info = {}
-    
-    # Check loaded images/modules
-    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-        # GDB commands
-        loaded_files = debug_client._send_command(session, "info files")
-        sources = debug_client._send_command(session, "info sources")
-        
-        # Paginate each output
-        loaded_files_page = paginate_text(loaded_files, limit, offset)
-        sources_page = paginate_text(sources, limit, offset)
-        
-        info["loaded_files"] = loaded_files_page["content"]
-        info["sources"] = sources_page["content"]
-        
-        pagination_info["loaded_files"] = {
-            "total_chars": loaded_files_page["total_chars"],
-            "offset": loaded_files_page["offset"],
-            "limit": loaded_files_page["limit"],
-            "has_more": loaded_files_page["has_more"]
-        }
-        pagination_info["sources"] = {
-            "total_chars": sources_page["total_chars"],
-            "offset": sources_page["offset"],
-            "limit": sources_page["limit"],
-            "has_more": sources_page["has_more"]
-        }
-    else:  # LLDB
-        # LLDB commands
-        images = debug_client._send_command(session, "image list")
-        source_map = debug_client._send_command(session, "settings show target.source-map")
-        source_info = debug_client._send_command(session, "source info")
-        
-        # Paginate each output
-        images_page = paginate_text(images, limit, offset)
-        source_map_page = paginate_text(source_map, limit, offset)
-        source_info_page = paginate_text(source_info, limit, offset)
-        
-        info["images"] = images_page["content"]
-        info["source_map"] = source_map_page["content"]
-        info["source_info"] = source_info_page["content"]
-        
-        pagination_info["images"] = {
-            "total_chars": images_page["total_chars"],
-            "offset": images_page["offset"],
-            "limit": images_page["limit"],
-            "has_more": images_page["has_more"]
-        }
-        pagination_info["source_map"] = {
-            "total_chars": source_map_page["total_chars"],
-            "offset": source_map_page["offset"],
-            "limit": source_map_page["limit"],
-            "has_more": source_map_page["has_more"]
-        }
-        pagination_info["source_info"] = {
-            "total_chars": source_info_page["total_chars"],
-            "offset": source_info_page["offset"],
-            "limit": source_info_page["limit"],
-            "has_more": source_info_page["has_more"]
-        }
-    
-    return {
-        "debug_info": info,
-        "pagination": pagination_info
-    }
-
-
-@mcp.tool()
-async def get_test_summary(session_id: str) -> Dict[str, Any]:
-    """Get a summary of test results for test debugging sessions.
-    
-    This tool is specifically for test sessions and provides information about:
-    - Test names and results
-    - Assertion failures
-    - Panic locations
-    
-    Args:
-        session_id: The session identifier
-        
-    Returns:
-        Dictionary with test summary information
-    """
-    if session_id not in debug_client.sessions:
-        return {"status": "error", "error": "Session not found"}
-    
-    session = debug_client.sessions[session_id]
-    
-    if session.target_type != "test":
-        return {"status": "error", "error": "This tool is only available for test sessions"}
-    
-    # Check current state and gather test info
-    summary = {
-        "session_type": "test",
-        "target": session.target,
-        "state": session.state.value,
-        "last_stop_reason": session.last_stop_reason
-    }
-    
-    # If we stopped on panic or assertion, get details
-    if "panic" in session.last_stop_reason or session.last_stop_reason == "breakpoint":
-        # Get backtrace to find test function
-        if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-            bt_output = debug_client._send_command(session, "backtrace 10")
-        else:
-            bt_output = debug_client._send_command(session, "thread backtrace -c 10")
-        
-        # Look for test function names
-        test_funcs = []
-        for line in bt_output.split('\n'):
-            if 'test::' in line or '::test_' in line or '::tests::' in line:
-                # Extract test function name
-                match = re.search(r'(test::\S+|::(test_\S+)|::tests::\S+)', line)
-                if match:
-                    test_funcs.append(match.group(1))
-        
-        summary["test_functions"] = test_funcs
-        
-        # If stopped on assertion/panic, get the message
-        if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-            # Try to get panic message from locals
-            locals_output = debug_client._send_command(session, "info locals")
-        else:
-            locals_output = debug_client._send_command(session, "frame variable")
-        
-        summary["panic_info"] = {
-            "location": session.current_location,
-            "locals": locals_output[:500]  # First 500 chars
-        }
-    
-    # Get overall test output if available
-    if session.last_output:
-        # Look for test result patterns
-        passed = len(re.findall(r'test .+ \.\.\. ok', session.last_output))
-        failed = len(re.findall(r'test .+ \.\.\. FAILED', session.last_output))
-        ignored = len(re.findall(r'test .+ \.\.\. ignored', session.last_output))
-        
-        if passed or failed or ignored:
-            summary["test_results"] = {
-                "passed": passed,
-                "failed": failed,
-                "ignored": ignored,
-                "total": passed + failed + ignored
-            }
-    
-    return summary
-
-
-@mcp.tool()
-async def get_enum_info(session_id: str, type_name: str) -> Dict[str, Any]:
-    """Get information about an enum type, including variant names and discriminants.
-    
-    This tool helps with understanding enum types and their variants,
-    which is useful for interpreting discriminant values in debug output.
-    
-    Args:
-        session_id: The session identifier
-        type_name: The enum type name (e.g., "Option<i32>", "MyEnum")
-        
-    Returns:
-        Dictionary with enum variant information
-    """
-    if session_id not in debug_client.sessions:
-        return {"status": "error", "error": "Session not found"}
-    
-    session = debug_client.sessions[session_id]
-    
-    # Try to get enum info
-    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-        # GDB: use ptype
-        output = debug_client._send_command(session, f"ptype {type_name}")
-    else:  # LLDB
-        # LLDB: try multiple approaches
-        # First try type lookup with the exact name
-        output = debug_client._send_command(session, f"type lookup {type_name}")
-        
-        # If that doesn't work, try without angle brackets for generic types
-        if "error" in output.lower() or len(output.strip()) < 20:
-            # Extract base type name
-            base_type = re.match(r'^([^<]+)', type_name)
-            if base_type:
-                alt_output = debug_client._send_command(session, f"type lookup {base_type.group(1)}")
-                if len(alt_output.strip()) > len(output.strip()):
-                    output = alt_output
-        
-        # If still no good output, try image lookup
-        if "error" in output.lower() or len(output.strip()) < 20:
-            image_output = debug_client._send_command(session, f"image lookup -t {type_name}")
-            if len(image_output.strip()) > len(output.strip()):
-                output = image_output
-    
-    # Parse enum variants
-    variants = {}
-    
-    # Look for enum variant patterns
-    # Rust enum format in debugger: "variant_name = N"
-    variant_matches = re.findall(r'(\w+)\s*=\s*(\d+)', output)
-    for name, value in variant_matches:
-        variants[int(value)] = name
-    
-    # Also look for enum definitions without explicit values
-    if not variants and "enum" in output:
-        # Extract variant names in order
-        lines = output.split('\n')
-        variant_index = 0
-        for line in lines:
-            line = line.strip()
-            # Skip non-variant lines
-            if not line or line.startswith('{') or line.startswith('}') or '=' in line:
-                continue
-            # Look for variant names (simple identifiers)
-            if re.match(r'^\w+(?:\(|$)', line):
-                variant_name = re.match(r'^(\w+)', line).group(1)
-                variants[variant_index] = variant_name
-                variant_index += 1
-    
-    return {
-        "type_name": type_name,
-        "variants": variants,
-        "raw_output": output
-    }
-
-
-@mcp.tool()
-async def evaluate(session_id: str, expression: str) -> Dict[str, Any]:
-    """Evaluate an arbitrary Rust expression in the current context.
-    
-    This is similar to print_variable but:
-    - May execute code with side effects
-    - Can modify program state
-    - Supports more complex expressions
-    - Has a longer timeout (expressions might compute)
-    
-    Use print_variable for simple variable inspection without side effects.
-    
-    Args:
-        session_id: The session identifier
-        expression: Rust expression to evaluate
-        
-    Returns:
-        Dictionary with the result
-    """
-    if session_id not in debug_client.sessions:
-        return {"status": "error", "error": "Session not found"}
-    
-    session = debug_client.sessions[session_id]
-    
-    # Send expression command with longer timeout
-    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-        cmd = f"print {expression}"
-    else:  # LLDB
-        cmd = f"expression -- {expression}"
-    
-    try:
-        # Use longer timeout for expression evaluation
-        output = debug_client._send_command(session, cmd, timeout=15.0)
-    except TimeoutError:
-        return {
-            "result": "",
-            "error": f"Expression evaluation timed out. The expression may be too complex or cause infinite computation.",
-            "expression": expression,
-            "suggestion": "Try using print_variable for simple variable inspection"
-        }
-    
-    # Pretty-print the output
-    pretty_output = pretty_print_rust_value(output)
-    
-    # Check for errors
-    error = ""
-    if "error:" in output.lower() or "no symbol" in output.lower():
-        error = output
-    
-    return {
-        "result": pretty_output if not error else "",
-        "error": error,
-        "expression": expression
-    }
-
-
-@mcp.tool()
-async def session_diagnostics(session_id: str) -> Dict[str, Any]:
-    """Get detailed diagnostic information about the current debugging session.
-    
-    This tool helps debug issues with the debugger itself by providing
-    detailed information about the session state, current context, and
-    debugger capabilities.
-    
-    Args:
-        session_id: The session identifier
-        
-    Returns:
-        Dictionary with comprehensive diagnostic information
-    """
-    if session_id not in debug_client.sessions:
-        return {"status": "error", "error": "Session not found"}
-    
-    session = debug_client.sessions[session_id]
-    
-    diagnostics = {
-        "session_id": session_id,
-        "debugger_type": session.debugger_type.value,
-        "state": session.state.value,
-        "has_started": session.has_started,
-        "last_stop_reason": session.last_stop_reason,
-        "current_location": session.current_location,
-        "breakpoints": len(session.breakpoints),
-        "process_alive": session.process is not None and session.process.poll() is None
-    }
-    
-    # Check actual debugger state
-    if session.process and session.process.poll() is None:
-        try:
-            # Get thread/process info
-            if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-                thread_info = debug_client._send_command(session, "info threads", timeout=2.0)
-                frame_info = debug_client._send_command(session, "info frame", timeout=2.0)
-                program_status = debug_client._send_command(session, "info program", timeout=2.0)
-            else:  # LLDB
-                thread_info = debug_client._send_command(session, "thread list", timeout=2.0)
-                frame_info = debug_client._send_command(session, "frame info", timeout=2.0)
-                program_status = debug_client._send_command(session, "process status", timeout=2.0)
-            
-            diagnostics["thread_info"] = thread_info[:500]  # First 500 chars
-            diagnostics["frame_info"] = frame_info[:500]
-            diagnostics["program_status"] = program_status[:500]
-            
-            # Check if we're actually stopped
-            if "stopped" in program_status.lower() or "suspended" in program_status.lower():
-                diagnostics["is_stopped"] = True
-                
-                # Try to get stop reason from process status
-                if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
-                    reason_match = re.search(r"stop reason = (.+)", program_status)
-                    if reason_match:
-                        diagnostics["actual_stop_reason"] = reason_match.group(1).strip()
-            else:
-                diagnostics["is_stopped"] = False
-            
-            # Test variable access
-            test_commands = []
-            if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-                test_commands = [
-                    ("info locals", "Local variables accessible"),
-                    ("info args", "Function arguments accessible"),
-                    ("info registers", "Registers accessible")
-                ]
-            else:  # LLDB
-                test_commands = [
-                    ("frame variable", "Local variables accessible"),
-                    ("frame variable -A", "All variables accessible"),
-                    ("register read", "Registers accessible")
-                ]
-            
-            diagnostics["context_tests"] = {}
-            for cmd, desc in test_commands:
-                try:
-                    output = debug_client._send_command(session, cmd, timeout=2.0)
-                    diagnostics["context_tests"][desc] = "success" if output and "error" not in output.lower() else "failed"
-                except:
-                    diagnostics["context_tests"][desc] = "error"
-            
-        except Exception as e:
-            diagnostics["diagnostic_error"] = str(e)
-    else:
-        diagnostics["process_alive"] = False
-        diagnostics["diagnostic_error"] = "Process not running"
-    
-    return diagnostics
-
-
-def main():
-    """Main entry point for the MCP server"""
-    import sys
-    import asyncio
-    
-    # Run the MCP server
-    asyncio.run(mcp.run())
-
-
-if __name__ == "__main__":
-    main()

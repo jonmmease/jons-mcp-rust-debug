@@ -290,10 +290,14 @@ Print the value of a variable or expression.
 Args:
   session_id: The session identifier
   expression: Variable name or expression
+  limit: Max characters to return (optional, for pagination)
+  offset: Starting character position (optional, for pagination)
+  depth: Maximum depth for nested structures (optional)
 Returns:
   value: String representation
   type: Type information
   expression: The evaluated expression
+  pagination: Pagination info for value and type
 ```
 
 #### list_locals
@@ -445,7 +449,39 @@ await start_debug(
 
 Based on user feedback, the following enhancements have been added:
 
-### Latest Updates (Round 3)
+### Latest Updates (PTY Support for macOS/LLDB)
+
+1. **PTY-Based Communication for LLDB** ✨:
+   - Implemented pseudo-terminal (PTY) support for LLDB on macOS/Unix
+   - Fixes the root cause where LLDB doesn't write to regular subprocess pipes
+   - Automatically uses PTY for LLDB/rust-lldb, regular pipes for GDB
+   - Handles LLDB's initialization sequence properly
+
+2. **Fixed All LLDB Output Issues**:
+   - ✅ Dereferencing (*expr) now works correctly
+   - ✅ Stop reasons are properly detected
+   - ✅ Source listing returns actual code
+   - ✅ Variable inspection shows types and values
+   - ✅ Process status and frame info captured
+
+3. **Improved Command Processing**:
+   - Better handling of command echoes in output
+   - Waits for LLDB initialization to complete
+   - More robust prompt detection
+   - Handles multi-line output correctly
+
+4. **Platform-Specific Optimizations**:
+   - Automatically detects when to use PTY (LLDB on Unix-like systems)
+   - Falls back to regular pipes for GDB and Windows
+   - Tested on macOS ARM64 with rust-lldb
+
+5. **Enhanced Output Parsing**:
+   - Removes command echoes from responses
+   - Handles LLDB's format variations
+   - Better timeout handling for slow operations
+   - Improved error recovery
+
+### Previous Updates (Round 3)
 
 1. **Session Diagnostics Tool**: New `session_diagnostics` tool provides comprehensive debugging state information
 2. **Improved Variable Printing**: Better handling of LLDB output with fallback to `frame variable` for simple variables
