@@ -154,6 +154,53 @@ async def test_test_debugging():
         print(f"\nError during test debugging: {e}")
 
 
+async def test_advanced_features():
+    """Test debugging with advanced features"""
+    print("\n=== Testing Advanced Features ===\n")
+    
+    # Change to test_samples directory
+    os.chdir("test_samples")
+    
+    try:
+        # Start debug session with custom flags
+        print("1. Starting debug session with custom cargo flags...")
+        result = await start_debug(
+            target_type="binary",
+            target="sample_program",
+            args=["test-arg"],
+            cargo_flags=["--release"],
+            env={"RUST_LOG": "debug", "RUST_BACKTRACE": "full"}
+        )
+        
+        if result["status"] != "started":
+            print(f"Failed to start: {result}")
+            return
+        
+        session_id = result["session_id"]
+        print(f"Advanced session started: {session_id}")
+        print(f"Built with --release flag and custom env vars\n")
+        
+        # Set a breakpoint
+        print("2. Setting breakpoint...")
+        bp = await set_breakpoint(session_id, function="main")
+        print(f"Breakpoint set: {bp}\n")
+        
+        # Run and check environment
+        print("3. Running with custom environment...")
+        run_result = await run(session_id)
+        print(f"Stopped at: {run_result.get('stopped_at', 'unknown')}\n")
+        
+        # Clean up
+        print("4. Stopping session...")
+        await stop_debug(session_id)
+        print("Advanced features test completed!\n")
+        
+    except Exception as e:
+        print(f"\nError during advanced features test: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 async def main():
     """Main entry point"""
     print("Testing basic debugging...")
@@ -163,6 +210,11 @@ async def main():
     
     print("Testing test debugging...")
     await test_test_debugging()
+    
+    print("\n" + "="*50 + "\n")
+    
+    print("Testing advanced features...")
+    await test_advanced_features()
 
 
 if __name__ == "__main__":

@@ -86,6 +86,12 @@ Args:
   target_type: "binary", "test", or "example" (required)
   target: Name of the specific target (optional for single binary)
   args: Command line arguments (optional)
+  cargo_flags: Additional cargo build flags (optional)
+    Example: ["--no-default-features", "--features", "test-only"]
+  env: Environment variables for the build process (optional)
+    Example: {"RUST_TEST_THREADS": "1", "CARGO_BUILD_TARGET": "x86_64-unknown-linux-gnu"}
+  package: Specific package name for workspace projects (optional)
+    Example: "my-crate" to build only that crate in a workspace
 Returns:
   session_id: Unique session identifier
   status: "started" or error message
@@ -289,6 +295,47 @@ The tool automatically selects the best debugger in this order:
 - Rust toolchain installed (cargo, rustc)
 - One of: gdb, lldb, rust-gdb, or rust-lldb
 - Python 3.10+
+
+## Usage Examples
+
+### Basic Binary Debugging
+```python
+# Start debugging a simple binary
+await start_debug("binary", "myapp")
+```
+
+### Debugging with Custom Features
+```python
+# Debug with specific features enabled
+await start_debug(
+    target_type="test",
+    target="integration_test",
+    cargo_flags=["--no-default-features", "--features", "test-only"],
+    env={"RUST_TEST_THREADS": "1"}
+)
+```
+
+### Workspace-Specific Debugging
+```python
+# Debug a specific crate in a workspace
+await start_debug(
+    target_type="binary",
+    target="server",
+    package="backend-crate",
+    cargo_flags=["--release"],
+    env={"RUST_LOG": "debug"}
+)
+```
+
+### Cross-Platform Debugging
+```python
+# Debug for a specific target platform
+await start_debug(
+    target_type="binary",
+    target="myapp",
+    env={"CARGO_BUILD_TARGET": "x86_64-unknown-linux-musl"}
+)
+```
 
 ## Limitations
 

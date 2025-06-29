@@ -39,7 +39,10 @@ class TestMCPTools:
             mock_create.assert_called_once_with(
                 target_type="binary",
                 target="myapp",
-                args=["arg1", "arg2"]
+                args=["arg1", "arg2"],
+                cargo_flags=None,
+                env=None,
+                package=None
             )
 
     @pytest.mark.asyncio
@@ -52,6 +55,36 @@ class TestMCPTools:
             
             assert result["status"] == "error"
             assert "Failed to start debugger" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_start_debug_with_advanced_options(self):
+        """Test debug session with cargo flags, env vars, and package"""
+        with patch.object(debug_client, 'create_session') as mock_create:
+            mock_create.return_value = "session_2"
+            debug_client.sessions["session_2"] = Mock(
+                debugger_type=Mock(value="lldb")
+            )
+            
+            result = await start_debug(
+                target_type="test",
+                target="my_test",
+                args=["--nocapture"],
+                cargo_flags=["--no-default-features", "--features", "test-only"],
+                env={"RUST_TEST_THREADS": "1", "RUST_LOG": "debug"},
+                package="my-crate"
+            )
+            
+            assert result["session_id"] == "session_2"
+            assert result["status"] == "started"
+            assert result["debugger"] == "lldb"
+            mock_create.assert_called_once_with(
+                target_type="test",
+                target="my_test",
+                args=["--nocapture"],
+                cargo_flags=["--no-default-features", "--features", "test-only"],
+                env={"RUST_TEST_THREADS": "1", "RUST_LOG": "debug"},
+                package="my-crate"
+            )
 
     @pytest.mark.asyncio
     async def test_stop_debug_success(self):

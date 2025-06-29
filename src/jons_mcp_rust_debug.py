@@ -214,7 +214,8 @@ class RustDebugClient:
         
         return cargo
 
-    def _build_target(self, target_type: str, target: str) -> str:
+    def _build_target(self, target_type: str, target: str, cargo_flags: List[str] = None, 
+                      env: Dict[str, str] = None, package: Optional[str] = None) -> str:
         """Build the target and return the path to the binary"""
         cargo = self._find_cargo_executable()
         
@@ -230,8 +231,21 @@ class RustDebugClient:
             if target:
                 cmd.extend(["--bin", target])
         
+        # Add package specification for workspace support
+        if package:
+            cmd.extend(["-p", package])
+        
         # Add any additional cargo args from config
         cmd.extend(self.config.cargo_args)
+        
+        # Add any runtime cargo flags
+        if cargo_flags:
+            cmd.extend(cargo_flags)
+        
+        # Merge environment variables
+        build_env = {**os.environ, **self.config.environment}
+        if env:
+            build_env.update(env)
         
         # Run cargo build
         logger.info(f"Building target: {' '.join(cmd)}")
@@ -240,7 +254,7 @@ class RustDebugClient:
             cwd=self.config.working_directory,
             capture_output=True,
             text=True,
-            env={**os.environ, **self.config.environment}
+            env=build_env
         )
         
         if result.returncode != 0:
@@ -255,7 +269,9 @@ class RustDebugClient:
                 return match.group(1)
         
         # Fallback: guess the binary location
-        target_dir = Path(self.config.working_directory) / "target" / "debug"
+        # Check if --release flag was used
+        build_mode = "release" if cargo_flags and "--release" in cargo_flags else "debug"
+        target_dir = Path(self.config.working_directory) / "target" / build_mode
         if target_type == "test":
             # Test binaries are in deps/ with hash suffix
             deps_dir = target_dir / "deps"
@@ -395,7 +411,9 @@ class RustDebugClient:
         output = session.last_output.replace(prompt, "").strip()
         return output
 
-    def create_session(self, target_type: str, target: str, args: List[str]) -> str:
+    def create_session(self, target_type: str, target: str, args: List[str], 
+                      cargo_flags: List[str] = None, env: Dict[str, str] = None,
+                      package: Optional[str] = None) -> str:
         """Create a new debugging session"""
         with self.lock:
             self.session_counter += 1
@@ -405,7 +423,7 @@ class RustDebugClient:
             debugger_type, debugger_path = self._find_debugger()
             
             # Build the target
-            binary_path = self._build_target(target_type, target)
+            binary_path = self._build_target(target_type, target, cargo_flags, env, package)
             
             # Create session
             session = DebugSession(
@@ -521,13 +539,23 @@ debug_client = RustDebugClient()
 # MCP Tools - Session Management
 
 @mcp.tool()
-async def start_debug(target_type: str, target: Optional[str] = None, args: Optional[List[str]] = None) -> Dict[str, Any]:
+async def start_debug(
+    target_type: str, 
+    target: Optional[str] = None, 
+    args: Optional[List[str]] = None,
+    cargo_flags: Optional[List[str]] = None,
+    env: Optional[Dict[str, str]] = None,
+    package: Optional[str] = None
+) -> Dict[str, Any]:
     """Start a new Rust debugging session.
     
     Args:
         target_type: Type of target to debug - "binary", "test", or "example"
         target: Name of the specific target (optional for binary if only one exists)
         args: Command line arguments to pass to the program
+        cargo_flags: Additional cargo build flags (e.g., ["--no-default-features", "--features", "test-only"])
+        env: Environment variables for the build process (e.g., {"RUST_TEST_THREADS": "1"})
+        package: Specific package name for workspace projects (e.g., "my-crate")
         
     Returns:
         Dictionary with session_id and status
@@ -536,7 +564,10 @@ async def start_debug(target_type: str, target: Optional[str] = None, args: Opti
         session_id = debug_client.create_session(
             target_type=target_type,
             target=target or "",
-            args=args or []
+            args=args or [],
+            cargo_flags=cargo_flags,
+            env=env,
+            package=package
         )
         return {
             "session_id": session_id,
