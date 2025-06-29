@@ -1,37 +1,46 @@
 # Jon's MCP Rust Debug Server
 
-A Model Context Protocol (MCP) server that provides Rust debugging capabilities through subprocess-based gdb/lldb integration.
+A Model Context Protocol (MCP) server that provides Rust debugging capabilities through LLDB Python API integration.
 
 ## Overview
 
-The MCP Rust Debug Server implements the Model Context Protocol to expose Rust debugger (gdb/lldb) functionality. It manages debugger subprocess sessions, enabling MCP clients to control debugging of Rust binaries, tests, and examples through a standardized interface.
+The MCP Rust Debug Server implements the Model Context Protocol to expose Rust debugger functionality using LLDB's Python API. This provides direct, reliable debugging control through LLDB's native Python bindings.
+
+The server enables MCP clients to control debugging of Rust binaries, tests, and examples through a standardized interface.
 
 ## Architecture
 
-This implementation uses a subprocess-based architecture where:
-- Each debug session spawns a separate debugger process (gdb or lldb)
-- Communication happens via stdin/stdout pipes
-- Thread-based I/O handling ensures non-blocking operations
+This implementation uses LLDB's Python API for direct debugging control:
+- Each debug session uses lldb.SBDebugger for direct API access
+- No subprocess or PTY communication needed
+- Event-driven architecture with LLDB's listener/event system
 - Sessions are managed independently, allowing multiple concurrent debugging sessions
-- Automatically uses rust-gdb/rust-lldb wrappers when available for better Rust support
+- Direct access to debugging objects (breakpoints, variables, frames)
 
 ## Features
 
-- **Multi-Debugger Support**: Works with gdb, lldb, rust-gdb, and rust-lldb
+- **LLDB Python API**: Direct, reliable debugging through LLDB's native Python bindings
 - **Cargo Integration**: Automatically builds targets before debugging
 - **Session Management**: Create and manage multiple debugging sessions concurrently
 - **Breakpoint Control**: Set, remove, and list breakpoints with conditions
 - **Execution Control**: Run, step, next, finish commands with clear action feedback
 - **Stack Navigation**: Navigate up and down the call stack, view backtraces
-- **Variable Inspection**: Examine variables with pretty-printing, evaluate expressions, list locals
+- **Variable Inspection**: Examine variables with direct API access, evaluate expressions, list locals
 - **Source Code Display**: View source code around current execution point
 - **Rust Panic Handling**: Automatically sets breakpoints on rust_panic
-- **Platform Detection**: Automatically selects the best debugger for your platform
 - **Test Debugging**: Special support for debugging Rust tests with test summary
-- **Smart Timeouts**: Different timeout values for different operations
+- **Event-Driven**: Uses LLDB's event system for responsive debugging
 - **Session State Tracking**: Track execution state and stop reasons
 
 ## Installation
+
+### Prerequisites
+
+- Rust toolchain (cargo, rustc)
+- LLDB with Python bindings:
+  - **macOS**: Included with Xcode Command Line Tools
+  - **Linux**: Install lldb-dev or python3-lldb package
+  - **Windows**: Limited support, LLDB installation required
 
 ### Using uv (recommended)
 
@@ -40,8 +49,8 @@ This implementation uses a subprocess-based architecture where:
 git clone https://github.com/jonmmease/jons-mcp-rust-debug.git
 cd jons-mcp-rust-debug
 
-# Install and run
-uv run python src/jons_mcp_rust_debug.py
+# Run the server
+uv run jons-mcp-rust-debug
 ```
 
 ### Direct from GitHub
@@ -98,14 +107,12 @@ Create a `rustdebugconfig.json` file in your project root:
 
 ```json
 {
-  "debugger": null,              // "gdb", "lldb", "rust-gdb", "rust-lldb", or path
   "cargo_path": null,            // Path to cargo executable (null = auto-detect)
   "working_directory": ".",      // Working directory for debugging
   "environment": {               // Additional environment variables
     "RUST_BACKTRACE": "1"
   },
-  "cargo_args": ["--release"],   // Additional cargo build arguments
-  "prefer_rust_wrappers": true   // Prefer rust-gdb/rust-lldb over plain gdb/lldb
+  "cargo_args": ["--release"]    // Additional cargo build arguments
 }
 ```
 
@@ -386,22 +393,14 @@ Returns:
 
 ## Platform Support
 
-- **Linux**: Best GDB support, rust-gdb recommended
-- **macOS**: LLDB preferred, rust-lldb recommended
-- **Windows**: GDB support through MinGW/MSYS2
-
-## Debugger Selection
-
-The tool automatically selects the best debugger in this order:
-1. Configured debugger in `rustdebugconfig.json`
-2. Platform-specific preference (LLDB on macOS, GDB on Linux)
-3. Rust-specific wrappers (rust-lldb, rust-gdb) if available
-4. Standard debuggers (lldb, gdb)
+- **macOS**: Best support - LLDB with Python bindings included with Xcode
+- **Linux**: Good support - Install lldb-dev or python3-lldb package
+- **Windows**: Limited support - Requires manual LLDB installation
 
 ## Requirements
 
 - Rust toolchain installed (cargo, rustc)
-- One of: gdb, lldb, rust-gdb, or rust-lldb
+- LLDB with Python bindings
 - Python 3.10+
 
 ## Usage Examples
@@ -447,81 +446,50 @@ await start_debug(
 
 ## Recent Improvements
 
-Based on user feedback, the following enhancements have been added:
+This implementation uses LLDB's Python API for direct, reliable debugging:
 
-### Latest Updates (PTY Support for macOS/LLDB)
+### Key Benefits
 
-1. **PTY-Based Communication for LLDB** ✨:
-   - Implemented pseudo-terminal (PTY) support for LLDB on macOS/Unix
-   - Fixes the root cause where LLDB doesn't write to regular subprocess pipes
-   - Automatically uses PTY for LLDB/rust-lldb, regular pipes for GDB
-   - Handles LLDB's initialization sequence properly
+1. **Direct API Access**:
+   - No subprocess or PTY communication needed
+   - Direct access to debugging objects and state
+   - Type-safe Python bindings
+   - Used by professional tools like CodeLLDB
 
-2. **Fixed All LLDB Output Issues**:
-   - ✅ Dereferencing (*expr) now works correctly
-   - ✅ Stop reasons are properly detected
-   - ✅ Source listing returns actual code
-   - ✅ Variable inspection shows types and values
-   - ✅ Process status and frame info captured
+2. **Reliable Operation**:
+   - ✅ Variable dereferencing works correctly
+   - ✅ Stop reasons are always accurate
+   - ✅ Source listing shows proper code
+   - ✅ Type information is complete
+   - ✅ No command echo or parsing issues
 
-3. **Improved Command Processing**:
-   - Better handling of command echoes in output
-   - Waits for LLDB initialization to complete
-   - More robust prompt detection
-   - Handles multi-line output correctly
+3. **Better Performance**:
+   - No PTY overhead or terminal emulation
+   - Direct API calls are faster
+   - Event-driven architecture
+   - Non-blocking operations
 
-4. **Platform-Specific Optimizations**:
-   - Automatically detects when to use PTY (LLDB on Unix-like systems)
-   - Falls back to regular pipes for GDB and Windows
-   - Tested on macOS ARM64 with rust-lldb
-
-5. **Enhanced Output Parsing**:
-   - Removes command echoes from responses
-   - Handles LLDB's format variations
-   - Better timeout handling for slow operations
-   - Improved error recovery
-
-### Previous Updates (Round 3)
-
-1. **Session Diagnostics Tool**: New `session_diagnostics` tool provides comprehensive debugging state information
-2. **Improved Variable Printing**: Better handling of LLDB output with fallback to `frame variable` for simple variables
-3. **Enhanced Source Listing**: Fixed minimal output issue with better context handling and file path resolution
-4. **Better Enum Type Lookup**: Multiple approaches for finding enum type information in LLDB
-5. **Automatic Stop Info Updates**: Stop reason and location now updated automatically when prompt detected
-
-### Previous Updates (Round 2)
-
-1. **Fixed Pretty-Printing Duplication**: Resolved issue where LLDB output was duplicated, now shows clean formatted output
-2. **Enhanced Stop Reason Detection**: Better detection of breakpoint stops in LLDB with "stop reason = breakpoint N" parsing
-3. **Improved Location Tracking**: Current location now properly tracked when stopped at breakpoints
-4. **Enum Variant Support**: New `get_enum_info` tool to lookup enum variant names from discriminant values
-5. **Cleaner Value Display**: Type information separated from value output for cleaner display
-
-### Previous Updates
-
-1. **Enhanced Command Flow**: The `run` command now returns clear action messages indicating what happened (e.g., "Started new execution", "Continued from breakpoint")
-2. **Improved Stop Reasons**: More detailed stop reasons including specific breakpoint numbers and exit codes
-3. **Better Variable Display**: Pretty-printing for Rust values with proper indentation
-4. **Session State Tracking**: Track whether program has started, last stop reason, and current location
-5. **Test-Specific Features**: Automatic breakpoints on test assertions and panic handlers, plus `get_test_summary` tool
-6. **Flexible Timeouts**: Different timeout values for different operations (30s for run, 15s for evaluate, 5s default)
-7. **Enhanced Backtrace Parsing**: More flexible parsing to handle various output formats
+4. **Enhanced Features**:
+   - Rich object inspection
+   - Accurate breakpoint management
+   - Proper thread and frame navigation
+   - Direct expression evaluation
 
 ## Limitations
 
-- Subprocess communication may have slight delays
-- Some advanced debugger features may not be exposed
-- Pretty-printing quality depends on debugger and Rust wrapper availability
-- Windows support may require additional setup
+- Requires LLDB with Python bindings (no GDB support)
+- Windows support is limited due to LLDB availability
+- Some LLDB features may not be fully exposed through the API
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Debugger not found**: Install gdb or lldb, or specify path in configuration
+1. **"LLDB Python module not found"**: 
+   - macOS: Use system Python or install Xcode Command Line Tools
+   - Linux: Install lldb-dev or python3-lldb package
 2. **Build failures**: Ensure cargo can build your project normally
 3. **Permission denied on macOS**: LLDB may require developer tools or code signing
-4. **Missing rust-gdb/rust-lldb**: Install with `rustup component add rust-src`
 
 ### Debugging the Debugger
 
