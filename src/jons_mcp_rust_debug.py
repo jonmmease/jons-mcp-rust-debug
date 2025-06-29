@@ -24,14 +24,13 @@ import logging
 import shutil
 import platform
 
-# Import LLDB - will need to handle import errors gracefully
+# Import LLDB
 try:
     import lldb
 except ImportError:
-    lldb = None
-    print("Warning: LLDB Python module not found. Please ensure LLDB is installed and Python bindings are available.")
-    print("On macOS: The system LLDB should have Python bindings")
-    print("On Linux: Install lldb-dev or lldb-devel package")
+    print("Error: LLDB Python module not found.")
+    print("Please install lldb-python: uv pip install lldb-python --prerelease=allow")
+    print("Or ensure LLDB is installed with Python bindings.")
     sys.exit(1)
 
 from mcp.server.fastmcp import FastMCP

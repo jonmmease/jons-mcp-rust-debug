@@ -18,7 +18,7 @@ classifiers = [
     "Topic :: Software Development :: Debuggers",
 ]
 
-dependencies = ["fastmcp>=0.2.8"]
+dependencies = ["fastmcp>=0.2.8", "lldb-python>=19.0.0.dev1"]
 
 [project.optional-dependencies]
 test = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0"]

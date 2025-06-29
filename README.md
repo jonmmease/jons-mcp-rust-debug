@@ -37,10 +37,7 @@ This implementation uses LLDB's Python API for direct debugging control:
 ### Prerequisites
 
 - Rust toolchain (cargo, rustc)
-- LLDB with Python bindings:
-  - **macOS**: Included with Xcode Command Line Tools
-  - **Linux**: Install lldb-dev or python3-lldb package
-  - **Windows**: Limited support, LLDB installation required
+- Python 3.10-3.12 (required by lldb-python package)
 
 ### Using uv (recommended)
 
@@ -393,15 +390,15 @@ Returns:
 
 ## Platform Support
 
-- **macOS**: Best support - LLDB with Python bindings included with Xcode
-- **Linux**: Good support - Install lldb-dev or python3-lldb package
-- **Windows**: Limited support - Requires manual LLDB installation
+- **macOS**: Best support with lldb-python package
+- **Linux**: Good support with lldb-python package  
+- **Windows**: Limited support - LLDB availability varies
 
 ## Requirements
 
 - Rust toolchain installed (cargo, rustc)
-- LLDB with Python bindings
-- Python 3.10+
+- Python 3.10-3.12
+- lldb-python package (automatically installed)
 
 ## Usage Examples
 
@@ -486,8 +483,8 @@ This implementation uses LLDB's Python API for direct, reliable debugging:
 ### Common Issues
 
 1. **"LLDB Python module not found"**: 
-   - macOS: Use system Python or install Xcode Command Line Tools
-   - Linux: Install lldb-dev or python3-lldb package
+   - Run: `uv pip install lldb-python --prerelease=allow`
+   - Ensure you're using Python 3.10-3.12
 2. **Build failures**: Ensure cargo can build your project normally
 3. **Permission denied on macOS**: LLDB may require developer tools or code signing
 
