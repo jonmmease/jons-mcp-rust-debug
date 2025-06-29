@@ -344,6 +344,28 @@ Returns:
   raw_output: Raw debugger output
 ```
 
+#### session_diagnostics
+Get detailed diagnostic information about the debugging session.
+```
+Args:
+  session_id: The session identifier
+Returns:
+  session_id: The session ID
+  debugger_type: Type of debugger (gdb/lldb/rust-gdb/rust-lldb)
+  state: Current state (idle/running/paused/finished/error)
+  has_started: Whether the program has been run
+  last_stop_reason: Why execution stopped
+  current_location: Current file:line if stopped
+  breakpoints: Number of breakpoints set
+  process_alive: Whether debugger process is running
+  thread_info: Thread information
+  frame_info: Current frame information
+  program_status: Program execution status
+  is_stopped: Whether actually stopped
+  actual_stop_reason: Real stop reason from debugger
+  context_tests: Results of context accessibility tests
+```
+
 #### check_debug_info
 Check debug symbol and source mapping information.
 ```
@@ -423,7 +445,15 @@ await start_debug(
 
 Based on user feedback, the following enhancements have been added:
 
-### Latest Updates (Round 2)
+### Latest Updates (Round 3)
+
+1. **Session Diagnostics Tool**: New `session_diagnostics` tool provides comprehensive debugging state information
+2. **Improved Variable Printing**: Better handling of LLDB output with fallback to `frame variable` for simple variables
+3. **Enhanced Source Listing**: Fixed minimal output issue with better context handling and file path resolution
+4. **Better Enum Type Lookup**: Multiple approaches for finding enum type information in LLDB
+5. **Automatic Stop Info Updates**: Stop reason and location now updated automatically when prompt detected
+
+### Previous Updates (Round 2)
 
 1. **Fixed Pretty-Printing Duplication**: Resolved issue where LLDB output was duplicated, now shows clean formatted output
 2. **Enhanced Stop Reason Detection**: Better detection of breakpoint stops in LLDB with "stop reason = breakpoint N" parsing
@@ -450,10 +480,38 @@ Based on user feedback, the following enhancements have been added:
 
 ## Troubleshooting
 
+### Common Issues
+
 1. **Debugger not found**: Install gdb or lldb, or specify path in configuration
 2. **Build failures**: Ensure cargo can build your project normally
 3. **Permission denied on macOS**: LLDB may require developer tools or code signing
 4. **Missing rust-gdb/rust-lldb**: Install with `rustup component add rust-src`
+
+### Debugging the Debugger
+
+If you're experiencing issues with the debugger not working as expected:
+
+1. **Use session_diagnostics**: Run this tool first to understand the current state
+   ```python
+   result = await session_diagnostics(session_id)
+   print(result["is_stopped"])  # Check if actually stopped
+   print(result["actual_stop_reason"])  # See real stop reason
+   print(result["context_tests"])  # Check what's accessible
+   ```
+
+2. **Variables showing as "unknown"**:
+   - Ensure the program is actually stopped at a breakpoint (not just set)
+   - Run the program first with the `run` command
+   - Check `session_diagnostics` to verify the debugger state
+
+3. **Empty enum info**:
+   - Try with just the base type name without generics (e.g., "Option" instead of "Option<i32>")
+   - Some complex generic types may not be fully supported
+
+4. **Minimal source listing**:
+   - Make sure debug symbols are included in your build
+   - Try specifying an explicit line number
+   - Check that source files are accessible from the working directory
 
 ## Development
 

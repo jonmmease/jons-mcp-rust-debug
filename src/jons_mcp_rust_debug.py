@@ -401,11 +401,38 @@ class RustDebugClient:
                 session.last_output += output
 
                 if prompt_pattern.search(accumulated_output):
+                    # Update stop information if we stopped
+                    self._update_stop_info(session, accumulated_output)
                     return True
             except queue.Empty:
                 continue
 
         return False
+    
+    def _update_stop_info(self, session: DebugSession, output: str):
+        """Update session stop information from debugger output"""
+        # For LLDB, check for stop reason in output
+        if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+            # Check for stop reason
+            reason_match = re.search(r"stop reason = (.+)", output)
+            if reason_match:
+                reason = reason_match.group(1).strip()
+                if "breakpoint" in reason:
+                    # Extract breakpoint number
+                    bp_match = re.search(r"breakpoint (\d+)", reason)
+                    if bp_match:
+                        session.last_stop_reason = f"breakpoint_{bp_match.group(1)}"
+                    else:
+                        session.last_stop_reason = "breakpoint"
+                    session.state = DebuggerState.PAUSED
+                else:
+                    session.last_stop_reason = reason
+                    session.state = DebuggerState.PAUSED
+            
+            # Update location
+            loc_match = re.search(r" at ([^:]+):(\d+)", output)
+            if loc_match:
+                session.current_location = f"{loc_match.group(1)}:{loc_match.group(2)}"
 
     def _clear_output_buffer(self, session: DebugSession):
         """Clear any pending output from the debugger"""
@@ -1687,9 +1714,32 @@ async def list_source(
         else:
             cmd = "list"
     else:  # LLDB
-        cmd = f"source list -l {line}" if line else "source list"
+        # For LLDB, we need to ensure we have a valid context
+        if line:
+            cmd = f"source list -l {line} -c {count}"
+        else:
+            # If no line specified, list around current location
+            if session.current_frame and session.current_frame.line > 0:
+                cmd = f"source list -l {session.current_frame.line} -c {count}"
+            else:
+                # Try to list from current frame
+                cmd = f"source list -c {count}"
     
     output = debug_client._send_command(session, cmd)
+    
+    # If LLDB returns minimal output, try alternative commands
+    if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB] and len(output.strip()) < 50:
+        # Try getting current file and line first
+        frame_info = debug_client._send_command(session, "frame info")
+        file_match = re.search(r' at ([^:]+):(\d+)', frame_info)
+        if file_match:
+            file_path = file_match.group(1)
+            line_num = int(file_match.group(2)) if not line else line
+            # Try with explicit file
+            cmd = f"source list -f {file_path} -l {line_num} -c {count}"
+            alt_output = debug_client._send_command(session, cmd)
+            if len(alt_output.strip()) > len(output.strip()):
+                output = alt_output
     
     # Handle pagination
     pagination = paginate_text(output, limit, offset)
@@ -1729,32 +1779,90 @@ async def print_variable(
     
     session = debug_client.sessions[session_id]
     
+    # Check if we're actually stopped first
+    if session.state != DebuggerState.PAUSED:
+        return {
+            "value": "",
+            "type": "",
+            "expression": expression,
+            "error": f"Cannot print variable: debugger is {session.state.value}, not paused",
+            "pagination": {
+                "value": {"total_chars": 0, "offset": 0, "limit": limit, "has_more": False},
+                "type": {"total_chars": 0, "offset": 0, "limit": limit, "has_more": False}
+            }
+        }
+    
     # Send print command
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
         output = debug_client._send_command(session, f"print {expression}")
         # Get type info separately
         type_output = debug_client._send_command(session, f"ptype {expression}")
     else:  # LLDB
-        # For LLDB, use expression with -T to get type and value together, then parse
-        combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
-        
-        # Split type from value for LLDB
-        # LLDB format: (type) $N = value
-        type_match = re.match(r'^\(([^)]+)\)', combined_output)
-        if type_match:
-            type_output = f"type = {type_match.group(1)}"
-            # Extract just the value part
-            value_part = combined_output[type_match.end():].strip()
-            # Remove the $N = prefix if present
-            value_match = re.match(r'\$\d+\s*=\s*', value_part)
-            if value_match:
-                output = value_part[value_match.end():]
+        # Try multiple approaches for LLDB
+        try:
+            # First try frame variable for simple variables
+            if re.match(r'^\w+$', expression):  # Simple variable name
+                frame_var_output = debug_client._send_command(session, f"frame variable {expression}")
+                if frame_var_output and "error" not in frame_var_output.lower():
+                    # Parse frame variable output: "(type) name = value"
+                    match = re.match(r'^\(([^)]+)\)\s*\w+\s*=\s*(.+)', frame_var_output.strip())
+                    if match:
+                        type_output = f"type = {match.group(1)}"
+                        output = match.group(2)
+                    else:
+                        # Try expression as fallback
+                        combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
+                        # Parse expression output
+                        type_match = re.match(r'^\(([^)]+)\)', combined_output)
+                        if type_match:
+                            type_output = f"type = {type_match.group(1)}"
+                            value_part = combined_output[type_match.end():].strip()
+                            value_match = re.match(r'\$\d+\s*=\s*', value_part)
+                            if value_match:
+                                output = value_part[value_match.end():]
+                            else:
+                                output = value_part
+                        else:
+                            output = combined_output
+                            type_output = "type = unknown"
+                else:
+                    # Fall back to expression
+                    combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
+                    type_match = re.match(r'^\(([^)]+)\)', combined_output)
+                    if type_match:
+                        type_output = f"type = {type_match.group(1)}"
+                        value_part = combined_output[type_match.end():].strip()
+                        value_match = re.match(r'\$\d+\s*=\s*', value_part)
+                        if value_match:
+                            output = value_part[value_match.end():]
+                        else:
+                            output = value_part
+                    else:
+                        output = combined_output
+                        type_output = "type = unknown"
             else:
-                output = value_part
-        else:
-            # Fallback if parsing fails
-            output = combined_output
+                # Complex expression, use expression command
+                combined_output = debug_client._send_command(session, f"expression -T -- {expression}")
+                type_match = re.match(r'^\(([^)]+)\)', combined_output)
+                if type_match:
+                    type_output = f"type = {type_match.group(1)}"
+                    value_part = combined_output[type_match.end():].strip()
+                    value_match = re.match(r'\$\d+\s*=\s*', value_part)
+                    if value_match:
+                        output = value_part[value_match.end():]
+                    else:
+                        output = value_part
+                else:
+                    output = combined_output
+                    type_output = "type = unknown"
+        except Exception as e:
+            logger.error(f"Error printing variable: {e}")
+            output = ""
             type_output = "type = unknown"
+    
+    # Log raw output for debugging
+    logger.info(f"Print variable raw output: {repr(output[:200])}")
+    logger.info(f"Print variable type output: {repr(type_output[:200])}")
     
     # Pretty-print the output for better readability
     pretty_output = pretty_print_rust_value(output)
@@ -2018,8 +2126,24 @@ async def get_enum_info(session_id: str, type_name: str) -> Dict[str, Any]:
         # GDB: use ptype
         output = debug_client._send_command(session, f"ptype {type_name}")
     else:  # LLDB
-        # LLDB: use type lookup
+        # LLDB: try multiple approaches
+        # First try type lookup with the exact name
         output = debug_client._send_command(session, f"type lookup {type_name}")
+        
+        # If that doesn't work, try without angle brackets for generic types
+        if "error" in output.lower() or len(output.strip()) < 20:
+            # Extract base type name
+            base_type = re.match(r'^([^<]+)', type_name)
+            if base_type:
+                alt_output = debug_client._send_command(session, f"type lookup {base_type.group(1)}")
+                if len(alt_output.strip()) > len(output.strip()):
+                    output = alt_output
+        
+        # If still no good output, try image lookup
+        if "error" in output.lower() or len(output.strip()) < 20:
+            image_output = debug_client._send_command(session, f"image lookup -t {type_name}")
+            if len(image_output.strip()) > len(output.strip()):
+                output = image_output
     
     # Parse enum variants
     variants = {}
@@ -2107,6 +2231,97 @@ async def evaluate(session_id: str, expression: str) -> Dict[str, Any]:
         "error": error,
         "expression": expression
     }
+
+
+@mcp.tool()
+async def session_diagnostics(session_id: str) -> Dict[str, Any]:
+    """Get detailed diagnostic information about the current debugging session.
+    
+    This tool helps debug issues with the debugger itself by providing
+    detailed information about the session state, current context, and
+    debugger capabilities.
+    
+    Args:
+        session_id: The session identifier
+        
+    Returns:
+        Dictionary with comprehensive diagnostic information
+    """
+    if session_id not in debug_client.sessions:
+        return {"status": "error", "error": "Session not found"}
+    
+    session = debug_client.sessions[session_id]
+    
+    diagnostics = {
+        "session_id": session_id,
+        "debugger_type": session.debugger_type.value,
+        "state": session.state.value,
+        "has_started": session.has_started,
+        "last_stop_reason": session.last_stop_reason,
+        "current_location": session.current_location,
+        "breakpoints": len(session.breakpoints),
+        "process_alive": session.process is not None and session.process.poll() is None
+    }
+    
+    # Check actual debugger state
+    if session.process and session.process.poll() is None:
+        try:
+            # Get thread/process info
+            if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+                thread_info = debug_client._send_command(session, "info threads", timeout=2.0)
+                frame_info = debug_client._send_command(session, "info frame", timeout=2.0)
+                program_status = debug_client._send_command(session, "info program", timeout=2.0)
+            else:  # LLDB
+                thread_info = debug_client._send_command(session, "thread list", timeout=2.0)
+                frame_info = debug_client._send_command(session, "frame info", timeout=2.0)
+                program_status = debug_client._send_command(session, "process status", timeout=2.0)
+            
+            diagnostics["thread_info"] = thread_info[:500]  # First 500 chars
+            diagnostics["frame_info"] = frame_info[:500]
+            diagnostics["program_status"] = program_status[:500]
+            
+            # Check if we're actually stopped
+            if "stopped" in program_status.lower() or "suspended" in program_status.lower():
+                diagnostics["is_stopped"] = True
+                
+                # Try to get stop reason from process status
+                if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+                    reason_match = re.search(r"stop reason = (.+)", program_status)
+                    if reason_match:
+                        diagnostics["actual_stop_reason"] = reason_match.group(1).strip()
+            else:
+                diagnostics["is_stopped"] = False
+            
+            # Test variable access
+            test_commands = []
+            if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+                test_commands = [
+                    ("info locals", "Local variables accessible"),
+                    ("info args", "Function arguments accessible"),
+                    ("info registers", "Registers accessible")
+                ]
+            else:  # LLDB
+                test_commands = [
+                    ("frame variable", "Local variables accessible"),
+                    ("frame variable -A", "All variables accessible"),
+                    ("register read", "Registers accessible")
+                ]
+            
+            diagnostics["context_tests"] = {}
+            for cmd, desc in test_commands:
+                try:
+                    output = debug_client._send_command(session, cmd, timeout=2.0)
+                    diagnostics["context_tests"][desc] = "success" if output and "error" not in output.lower() else "failed"
+                except:
+                    diagnostics["context_tests"][desc] = "error"
+            
+        except Exception as e:
+            diagnostics["diagnostic_error"] = str(e)
+    else:
+        diagnostics["process_alive"] = False
+        diagnostics["diagnostic_error"] = "Process not running"
+    
+    return diagnostics
 
 
 def main():
