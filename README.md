@@ -21,12 +21,15 @@ This implementation uses a subprocess-based architecture where:
 - **Cargo Integration**: Automatically builds targets before debugging
 - **Session Management**: Create and manage multiple debugging sessions concurrently
 - **Breakpoint Control**: Set, remove, and list breakpoints with conditions
-- **Execution Control**: Run, step, next, finish commands
+- **Execution Control**: Run, step, next, finish commands with clear action feedback
 - **Stack Navigation**: Navigate up and down the call stack, view backtraces
-- **Variable Inspection**: Examine variables, evaluate expressions, list locals
+- **Variable Inspection**: Examine variables with pretty-printing, evaluate expressions, list locals
 - **Source Code Display**: View source code around current execution point
 - **Rust Panic Handling**: Automatically sets breakpoints on rust_panic
 - **Platform Detection**: Automatically selects the best debugger for your platform
+- **Test Debugging**: Special support for debugging Rust tests with test summary
+- **Smart Timeouts**: Different timeout values for different operations
+- **Session State Tracking**: Track execution state and stop reasons
 
 ## Installation
 
@@ -314,6 +317,21 @@ Returns:
   expression: The evaluated expression
 ```
 
+#### get_test_summary
+Get test-specific information (test sessions only).
+```
+Args:
+  session_id: The session identifier
+Returns:
+  session_type: "test"
+  target: Test target name
+  state: Current debugger state
+  last_stop_reason: Why execution stopped
+  test_functions: List of test functions in backtrace
+  panic_info: Details about panic if stopped on assertion
+  test_results: Summary of passed/failed/ignored tests
+```
+
 #### check_debug_info
 Check debug symbol and source mapping information.
 ```
@@ -388,6 +406,18 @@ await start_debug(
     env={"CARGO_BUILD_TARGET": "x86_64-unknown-linux-musl"}
 )
 ```
+
+## Recent Improvements
+
+Based on user feedback, the following enhancements have been added:
+
+1. **Enhanced Command Flow**: The `run` command now returns clear action messages indicating what happened (e.g., "Started new execution", "Continued from breakpoint")
+2. **Improved Stop Reasons**: More detailed stop reasons including specific breakpoint numbers and exit codes
+3. **Better Variable Display**: Pretty-printing for Rust values with proper indentation
+4. **Session State Tracking**: Track whether program has started, last stop reason, and current location
+5. **Test-Specific Features**: Automatic breakpoints on test assertions and panic handlers, plus `get_test_summary` tool
+6. **Flexible Timeouts**: Different timeout values for different operations (30s for run, 15s for evaluate, 5s default)
+7. **Enhanced Backtrace Parsing**: More flexible parsing to handle various output formats
 
 ## Limitations
 

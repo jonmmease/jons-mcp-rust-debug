@@ -124,6 +124,9 @@ class DebugSession:
     last_output: str = ""
     debugger_type: DebuggerType = DebuggerType.GDB
     debugger_path: str = ""
+    has_started: bool = False  # Track if program has been started
+    last_stop_reason: str = ""  # Track why we stopped
+    current_location: Optional[str] = None  # Current file:line
 
 
 class RustDebugClient:
@@ -413,7 +416,7 @@ class RustDebugClient:
             pass
         session.last_output = ""
 
-    def _send_command(self, session: DebugSession, command: str, wait_for_response: bool = True) -> str:
+    def _send_command(self, session: DebugSession, command: str, wait_for_response: bool = True, timeout: float = 5.0) -> str:
         """Send command to debugger and optionally wait for response"""
         # Clear any pending output first
         self._clear_output_buffer(session)
@@ -424,8 +427,8 @@ class RustDebugClient:
         if not wait_for_response:
             return ""
         
-        # Wait for prompt
-        if not self._wait_for_prompt(session):
+        # Wait for prompt with custom timeout
+        if not self._wait_for_prompt(session, timeout=timeout):
             raise TimeoutError(f"Timeout waiting for debugger response to command: {command}")
         
         # Return the output (excluding the prompt)
@@ -548,6 +551,24 @@ class RustDebugClient:
                 self._send_command(session, f"settings set target.run-args {' '.join(args) if args else ''}")
                 self._send_command(session, f"platform settings -w {self.config.working_directory}")
             
+            # Test-specific setup
+            if target_type == "test":
+                # Set test-specific breakpoints
+                if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+                    # Break on test assertions
+                    self._send_command(session, "break rust_begin_unwind")
+                    self._send_command(session, "break core::panicking::panic")
+                else:
+                    # LLDB equivalents
+                    self._send_command(session, "b rust_begin_unwind")
+                    self._send_command(session, "b core::panicking::panic")
+                
+                # Set environment for better test output
+                if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+                    self._send_command(session, "set environment RUST_BACKTRACE=1")
+                else:
+                    self._send_command(session, "settings set target.env-vars RUST_BACKTRACE=1")
+            
             session.state = DebuggerState.PAUSED
             self.sessions[session_id] = session
             
@@ -582,6 +603,45 @@ class RustDebugClient:
 
 # Global debug client instance
 debug_client = RustDebugClient()
+
+
+# Helper function for pretty-printing Rust types
+def pretty_print_rust_value(raw_output: str) -> str:
+    """Attempt to pretty-print Rust debugger output."""
+    try:
+        # Basic indentation improvement
+        lines = raw_output.split('\n')
+        result = []
+        indent = 0
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Decrease indent for closing braces
+            if line.startswith('}'):
+                indent = max(0, indent - 2)
+            
+            # Add indented line
+            result.append(' ' * indent + line)
+            
+            # Increase indent after opening braces
+            if line.endswith('{'):
+                indent += 2
+        
+        output = '\n'.join(result)
+        
+        # Try to resolve enum discriminants
+        # Look for patterns like "$discr$ = 7" and add context if possible
+        if '$discr$' in output:
+            # This is an enum, try to add variant name
+            output = re.sub(r'\$discr\$ = (\d+)', r'variant_discriminant = \1', output)
+        
+        return output
+    except:
+        # If pretty-printing fails, return original
+        return raw_output
 
 
 # Helper function for pagination
@@ -978,22 +1038,60 @@ async def run(
         return {"status": "error", "error": "Session not found"}
     
     session = debug_client.sessions[session_id]
+    
+    # Determine which command to use and track action
+    action_taken = ""
+    if not session.has_started:
+        # First time running
+        cmd = "run"
+        action_taken = "Started new execution"
+        session.has_started = True
+    else:
+        # Program has been started before
+        if session.state == DebuggerState.PAUSED:
+            cmd = "continue"
+            action_taken = f"Continued from {session.current_location or 'breakpoint'}"
+        elif session.state == DebuggerState.FINISHED:
+            cmd = "run"
+            action_taken = "Restarted execution"
+        elif session.state == DebuggerState.RUNNING:
+            # Already running
+            return {
+                "status": "running",
+                "action": "Already running",
+                "message": "Program is already executing",
+                "pagination": {
+                    "total_chars": 0,
+                    "offset": 0,
+                    "limit": limit,
+                    "has_more": False
+                }
+            }
+        else:
+            cmd = "continue"
+            action_taken = "Continued execution"
+    
+    # Now set state to running
     session.state = DebuggerState.RUNNING
     
-    # Send run/continue command
-    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-        cmd = "run" if "Starting program" not in session.last_output else "continue"
-    else:  # LLDB
-        cmd = "run" if "Process" not in session.last_output else "continue"
-    
-    output = debug_client._send_command(session, cmd)
+    # Use longer timeout for run commands as they might take time
+    output = debug_client._send_command(session, cmd, timeout=30.0)
     
     # Parse stop reason
     stop_reason = "unknown"
     stopped_at = ""
     
+    # Log output for debugging
+    logger.debug(f"Run/continue output: {output}")
+    
     if "Breakpoint" in output:
         stop_reason = "breakpoint"
+        session.state = DebuggerState.PAUSED
+        # Extract breakpoint number if available
+        bp_match = re.search(r"Breakpoint (\d+)", output)
+        if bp_match:
+            stop_reason = f"breakpoint_{bp_match.group(1)}"
+        
         # Extract location
         if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
             match = GDB_CURRENT_LOCATION_PATTERN.search(output)
@@ -1003,23 +1101,39 @@ async def run(
             match = LLDB_CURRENT_LOCATION_PATTERN.search(output)
             if match:
                 stopped_at = f"{match.group(2)}:{match.group(3)}"
-    elif "Program exited" in output or "Process exited" in output:
+    elif "Program exited" in output or "Process exited" in output or "exited with" in output:
         stop_reason = "exited"
         session.state = DebuggerState.FINISHED
-    elif "received signal" in output:
+        # Try to extract exit code
+        exit_match = re.search(r"exited (?:with code|normally) \[(\d+)\]", output)
+        if exit_match:
+            stop_reason = f"exited_code_{exit_match.group(1)}"
+    elif "received signal" in output or "signal" in output.lower():
         stop_reason = "signal"
+        session.state = DebuggerState.PAUSED
         if "SIGSEGV" in output:
             stop_reason = "segfault"
         elif "SIGABRT" in output:
             stop_reason = "abort"
+        elif "SIGINT" in output:
+            stop_reason = "interrupted"
+    elif "panic" in output.lower():
+        stop_reason = "panic"
+        session.state = DebuggerState.PAUSED
+    
+    # Update session tracking
+    session.last_stop_reason = stop_reason
+    session.current_location = stopped_at if stopped_at else session.current_location
     
     # Handle pagination
     pagination = paginate_text(output, limit, offset)
     
     return {
         "status": session.state.value,
+        "action": action_taken,
         "stop_reason": stop_reason,
         "stopped_at": stopped_at,
+        "current_location": session.current_location,
         "output": pagination["content"],
         "pagination": {
             "total_chars": pagination["total_chars"],
@@ -1050,32 +1164,64 @@ async def step(session_id: str) -> Dict[str, Any]:
     
     # Parse location
     location = ""
+    function = ""
+    file = ""
+    line = 0
+    
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
         match = GDB_CURRENT_LOCATION_PATTERN.search(output)
         if match:
-            location = f"{match.group(3)}:{match.group(4)}"
+            file = match.group(3)
+            line = int(match.group(4))
+            function = match.group(2)
+            location = f"{file}:{line}"
             session.current_frame = StackFrame(
                 index=0,
-                file=match.group(3),
-                line=int(match.group(4)),
-                function=match.group(2),
+                file=file,
+                line=line,
+                function=function,
                 address=match.group(1)
             )
     else:
         match = LLDB_CURRENT_LOCATION_PATTERN.search(output)
         if match:
-            location = f"{match.group(2)}:{match.group(3)}"
+            file = match.group(2)
+            line = int(match.group(3))
+            function = match.group(1)
+            location = f"{file}:{line}"
             session.current_frame = StackFrame(
                 index=0,
-                file=match.group(2),
-                line=int(match.group(3)),
-                function=match.group(1),
+                file=file,
+                line=line,
+                function=function,
                 address=""
             )
     
+    # Update session location
+    session.current_location = location if location else session.current_location
+    session.state = DebuggerState.PAUSED
+    
+    # If we couldn't parse location, try to get it explicitly
+    if not location:
+        try:
+            if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+                where_output = debug_client._send_command(session, "where 1")
+            else:
+                where_output = debug_client._send_command(session, "thread backtrace -c 1")
+            
+            # Try to parse from where output
+            logger.debug(f"Where output for location: {where_output}")
+        except:
+            pass
+    
     return {
+        "status": session.state.value,
         "location": location,
-        "output": output
+        "file": file,
+        "line": line,
+        "function": function,
+        "output": output,
+        "message": "Stepped into next line" if location else "Step completed but location unknown"
     }
 
 
@@ -1087,7 +1233,7 @@ async def next(session_id: str) -> Dict[str, Any]:
         session_id: The session identifier
         
     Returns:
-        Dictionary with new location
+        Dictionary with new location and state
     """
     if session_id not in debug_client.sessions:
         return {"status": "error", "error": "Session not found"}
@@ -1099,32 +1245,64 @@ async def next(session_id: str) -> Dict[str, Any]:
     
     # Parse location (same as step)
     location = ""
+    function = ""
+    file = ""
+    line = 0
+    
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
         match = GDB_CURRENT_LOCATION_PATTERN.search(output)
         if match:
-            location = f"{match.group(3)}:{match.group(4)}"
+            file = match.group(3)
+            line = int(match.group(4))
+            function = match.group(2)
+            location = f"{file}:{line}"
             session.current_frame = StackFrame(
                 index=0,
-                file=match.group(3),
-                line=int(match.group(4)),
-                function=match.group(2),
+                file=file,
+                line=line,
+                function=function,
                 address=match.group(1)
             )
     else:
         match = LLDB_CURRENT_LOCATION_PATTERN.search(output)
         if match:
-            location = f"{match.group(2)}:{match.group(3)}"
+            file = match.group(2)
+            line = int(match.group(3))
+            function = match.group(1)
+            location = f"{file}:{line}"
             session.current_frame = StackFrame(
                 index=0,
-                file=match.group(2),
-                line=int(match.group(3)),
-                function=match.group(1),
+                file=file,
+                line=line,
+                function=function,
                 address=""
             )
     
+    # Update session location
+    session.current_location = location if location else session.current_location
+    session.state = DebuggerState.PAUSED
+    
+    # If we couldn't parse location, try to get it explicitly
+    if not location:
+        try:
+            if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+                where_output = debug_client._send_command(session, "where 1")
+            else:
+                where_output = debug_client._send_command(session, "thread backtrace -c 1")
+            
+            # Try to parse from where output
+            logger.debug(f"Where output for location: {where_output}")
+        except:
+            pass
+    
     return {
+        "status": session.state.value,
         "location": location,
-        "output": output
+        "file": file,
+        "line": line,
+        "function": function,
+        "output": output,
+        "message": "Stepped over to next line" if location else "Step completed but location unknown"
     }
 
 
@@ -1193,6 +1371,9 @@ async def backtrace(
     
     output = debug_client._send_command(session, cmd)
     
+    # Log raw output for debugging
+    logger.info(f"Backtrace raw output: {repr(output[:500])}")
+    
     # Parse stack frames
     frames = []
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
@@ -1205,6 +1386,8 @@ async def backtrace(
                 "line": int(match.group(5))
             })
     else:  # LLDB
+        # Try multiple patterns for LLDB output
+        # Pattern 1: Standard format
         for match in LLDB_STACK_FRAME_PATTERN.finditer(output):
             frames.append({
                 "index": int(match.group(1)),
@@ -1212,6 +1395,57 @@ async def backtrace(
                 "file": match.group(3),
                 "line": int(match.group(4))
             })
+        
+        # If no frames found, try alternative patterns
+        if not frames:
+            # Pattern 2: Without file info
+            alt_pattern = re.compile(r"frame #(\d+):\s*0x[0-9a-fA-F]+\s+(.+?)(?:\s+\+|$)", re.MULTILINE)
+            for match in alt_pattern.finditer(output):
+                frames.append({
+                    "index": int(match.group(1)),
+                    "function": match.group(2).strip(),
+                    "file": "",
+                    "line": 0
+                })
+    
+    # If still no frames and we have output, try more flexible parsing
+    if not frames and output.strip():
+        # Split by lines and look for frame-like patterns
+        lines = output.strip().split('\n')
+        for line in lines:
+            # Skip empty lines and prompts
+            if not line.strip() or 'gdb)' in line or 'lldb)' in line:
+                continue
+            
+            # Look for any line with frame number
+            frame_match = re.search(r'#(\d+)', line)
+            if frame_match:
+                frame_num = int(frame_match.group(1))
+                
+                # Try to extract function name
+                func_match = re.search(r'in\s+(\S+)', line) or re.search(r'`(\S+)', line)
+                function = func_match.group(1) if func_match else "unknown"
+                
+                # Try to extract file:line
+                file_match = re.search(r'(\S+\.rs):(\d+)', line)
+                if file_match:
+                    file = file_match.group(1)
+                    line_num = int(file_match.group(2))
+                else:
+                    file = ""
+                    line_num = 0
+                
+                frames.append({
+                    "index": frame_num,
+                    "function": function,
+                    "file": file,
+                    "line": line_num
+                })
+    
+    # Log parsing results
+    logger.info(f"Parsed {len(frames)} frames from backtrace")
+    if not frames and output.strip():
+        logger.warning(f"No frames parsed from non-empty backtrace output. First 200 chars: {repr(output[:200])}")
     
     # Handle pagination of raw output
     pagination = paginate_text(output, char_limit, char_offset)
@@ -1395,6 +1629,9 @@ async def print_variable(
     # Send print command
     output = debug_client._send_command(session, f"print {expression}")
     
+    # Pretty-print the output for better readability
+    pretty_output = pretty_print_rust_value(output)
+    
     # Also get type info
     type_output = ""
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
@@ -1403,7 +1640,7 @@ async def print_variable(
         type_output = debug_client._send_command(session, f"expression -T -- {expression}")
     
     # Paginate both outputs
-    value_pagination = paginate_text(output, limit, offset)
+    value_pagination = paginate_text(pretty_output, limit, offset)
     type_pagination = paginate_text(type_output, limit, offset)
     
     return {
@@ -1558,8 +1795,96 @@ async def check_debug_info(
 
 
 @mcp.tool()
+async def get_test_summary(session_id: str) -> Dict[str, Any]:
+    """Get a summary of test results for test debugging sessions.
+    
+    This tool is specifically for test sessions and provides information about:
+    - Test names and results
+    - Assertion failures
+    - Panic locations
+    
+    Args:
+        session_id: The session identifier
+        
+    Returns:
+        Dictionary with test summary information
+    """
+    if session_id not in debug_client.sessions:
+        return {"status": "error", "error": "Session not found"}
+    
+    session = debug_client.sessions[session_id]
+    
+    if session.target_type != "test":
+        return {"status": "error", "error": "This tool is only available for test sessions"}
+    
+    # Check current state and gather test info
+    summary = {
+        "session_type": "test",
+        "target": session.target,
+        "state": session.state.value,
+        "last_stop_reason": session.last_stop_reason
+    }
+    
+    # If we stopped on panic or assertion, get details
+    if "panic" in session.last_stop_reason or session.last_stop_reason == "breakpoint":
+        # Get backtrace to find test function
+        if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+            bt_output = debug_client._send_command(session, "backtrace 10")
+        else:
+            bt_output = debug_client._send_command(session, "thread backtrace -c 10")
+        
+        # Look for test function names
+        test_funcs = []
+        for line in bt_output.split('\n'):
+            if 'test::' in line or '::test_' in line or '::tests::' in line:
+                # Extract test function name
+                match = re.search(r'(test::\S+|::(test_\S+)|::tests::\S+)', line)
+                if match:
+                    test_funcs.append(match.group(1))
+        
+        summary["test_functions"] = test_funcs
+        
+        # If stopped on assertion/panic, get the message
+        if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+            # Try to get panic message from locals
+            locals_output = debug_client._send_command(session, "info locals")
+        else:
+            locals_output = debug_client._send_command(session, "frame variable")
+        
+        summary["panic_info"] = {
+            "location": session.current_location,
+            "locals": locals_output[:500]  # First 500 chars
+        }
+    
+    # Get overall test output if available
+    if session.last_output:
+        # Look for test result patterns
+        passed = len(re.findall(r'test .+ \.\.\. ok', session.last_output))
+        failed = len(re.findall(r'test .+ \.\.\. FAILED', session.last_output))
+        ignored = len(re.findall(r'test .+ \.\.\. ignored', session.last_output))
+        
+        if passed or failed or ignored:
+            summary["test_results"] = {
+                "passed": passed,
+                "failed": failed,
+                "ignored": ignored,
+                "total": passed + failed + ignored
+            }
+    
+    return summary
+
+
+@mcp.tool()
 async def evaluate(session_id: str, expression: str) -> Dict[str, Any]:
     """Evaluate an arbitrary Rust expression in the current context.
+    
+    This is similar to print_variable but:
+    - May execute code with side effects
+    - Can modify program state
+    - Supports more complex expressions
+    - Has a longer timeout (expressions might compute)
+    
+    Use print_variable for simple variable inspection without side effects.
     
     Args:
         session_id: The session identifier
@@ -1573,13 +1898,25 @@ async def evaluate(session_id: str, expression: str) -> Dict[str, Any]:
     
     session = debug_client.sessions[session_id]
     
-    # Send expression command
+    # Send expression command with longer timeout
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
         cmd = f"print {expression}"
     else:  # LLDB
         cmd = f"expression -- {expression}"
     
-    output = debug_client._send_command(session, cmd)
+    try:
+        # Use longer timeout for expression evaluation
+        output = debug_client._send_command(session, cmd, timeout=15.0)
+    except TimeoutError:
+        return {
+            "result": "",
+            "error": f"Expression evaluation timed out. The expression may be too complex or cause infinite computation.",
+            "expression": expression,
+            "suggestion": "Try using print_variable for simple variable inspection"
+        }
+    
+    # Pretty-print the output
+    pretty_output = pretty_print_rust_value(output)
     
     # Check for errors
     error = ""
@@ -1587,7 +1924,7 @@ async def evaluate(session_id: str, expression: str) -> Dict[str, Any]:
         error = output
     
     return {
-        "result": output if not error else "",
+        "result": pretty_output if not error else "",
         "error": error,
         "expression": expression
     }
