@@ -273,7 +273,22 @@ class RustDebugClient:
         if not session.process or not session.process.IsValid():
             return
             
-        thread = session.process.GetSelectedThread()
+        # Find the thread that caused the stop (e.g., hit a breakpoint)
+        thread = None
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid():
+                reason = t.GetStopReason()
+                if reason != lldb.eStopReasonNone:
+                    thread = t
+                    # Select this thread for future operations
+                    session.process.SetSelectedThread(t)
+                    break
+        
+        if not thread:
+            # Fallback to selected thread
+            thread = session.process.GetSelectedThread()
+            
         if not thread or not thread.IsValid():
             return
             
@@ -291,9 +306,10 @@ class RustDebugClient:
         else:
             session.last_stop_reason = "unknown"
             
-        # Get current location
-        frame = thread.GetSelectedFrame()
+        # Get current location - ensure we're at the right frame
+        frame = thread.GetFrameAtIndex(0)  # Get frame 0 which is where we stopped
         if frame and frame.IsValid():
+            thread.SetSelectedFrame(0)  # Make sure frame 0 is selected
             line_entry = frame.GetLineEntry()
             if line_entry.IsValid():
                 file_spec = line_entry.GetFileSpec()
@@ -371,6 +387,20 @@ class RustDebugClient:
             logger.error(f"Error stopping session {session_id}: {e}")
         
         del self.sessions[session_id]
+    
+    def _stop_reason_to_string(self, reason: int) -> str:
+        """Convert LLDB stop reason to string."""
+        reasons = {
+            lldb.eStopReasonNone: "none",
+            lldb.eStopReasonTrace: "trace",
+            lldb.eStopReasonBreakpoint: "breakpoint",
+            lldb.eStopReasonWatchpoint: "watchpoint",
+            lldb.eStopReasonSignal: "signal",
+            lldb.eStopReasonException: "exception",
+            lldb.eStopReasonExec: "exec",
+            lldb.eStopReasonPlanComplete: "plan_complete"
+        }
+        return reasons.get(reason, "unknown")
 
 
 # Global debug client instance
@@ -720,7 +750,17 @@ async def step(session_id: str) -> Dict[str, Any]:
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -779,7 +819,17 @@ async def next(session_id: str) -> Dict[str, Any]:
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -838,7 +888,17 @@ async def finish(session_id: str) -> Dict[str, Any]:
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -890,7 +950,17 @@ async def backtrace(
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -959,7 +1029,17 @@ async def up(session_id: str, count: int = 1) -> Dict[str, Any]:
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -1008,7 +1088,17 @@ async def down(session_id: str, count: int = 1) -> Dict[str, Any]:
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -1065,7 +1155,17 @@ async def list_source(
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -1082,7 +1182,20 @@ async def list_source(
     current_line = line if line else line_entry.GetLine()
     
     # Try to read the source file
-    file_path = file_spec.GetDirectory() + "/" + file_spec.GetFilename()
+    file_path = os.path.join(file_spec.GetDirectory() or "", file_spec.GetFilename() or "")
+    
+    # If the path doesn't exist, try to resolve it relative to working directory
+    if not os.path.exists(file_path):
+        # Try just the filename in case it's a relative path
+        alt_path = file_spec.GetFilename()
+        if os.path.exists(alt_path):
+            file_path = alt_path
+        else:
+            # Try to find it in the source directories
+            for root, dirs, files in os.walk(debug_client.config.working_directory):
+                if file_spec.GetFilename() in files:
+                    file_path = os.path.join(root, file_spec.GetFilename())
+                    break
     
     try:
         with open(file_path, 'r') as f:
@@ -1142,7 +1255,17 @@ async def print_variable(
             "error": f"Cannot print variable: debugger is {session.state.value}, not paused"
         }
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -1211,7 +1334,17 @@ async def list_locals(
     if not session.process or not session.process.IsValid():
         return {"status": "error", "error": "Process not running"}
     
+    # Ensure we have the correct thread selected
     thread = session.process.GetSelectedThread()
+    if not thread or not thread.IsValid():
+        # Try to find a thread with a stop reason
+        for i in range(session.process.GetNumThreads()):
+            t = session.process.GetThreadAtIndex(i)
+            if t and t.IsValid() and t.GetStopReason() != lldb.eStopReasonNone:
+                thread = t
+                session.process.SetSelectedThread(t)
+                break
+                
     if not thread or not thread.IsValid():
         return {"status": "error", "error": "No active thread"}
     
@@ -1270,6 +1403,87 @@ async def evaluate(session_id: str, expression: str) -> Dict[str, Any]:
         "error": None,
         "expression": expression
     }
+
+
+@mcp.tool()
+async def list_threads(session_id: str) -> Dict[str, Any]:
+    """List all threads in the process."""
+    if session_id not in debug_client.sessions:
+        return {"status": "error", "error": "Session not found"}
+    
+    session = debug_client.sessions[session_id]
+    
+    if not session.process or not session.process.IsValid():
+        return {"status": "error", "error": "Process not running"}
+    
+    threads = []
+    selected_thread = session.process.GetSelectedThread()
+    selected_tid = selected_thread.GetThreadID() if selected_thread else None
+    
+    for i in range(session.process.GetNumThreads()):
+        thread = session.process.GetThreadAtIndex(i)
+        if thread and thread.IsValid():
+            # Get thread info
+            tid = thread.GetThreadID()
+            name = thread.GetName() or f"Thread {i+1}"
+            
+            # Get stop reason
+            stop_reason = thread.GetStopReason()
+            stop_reason_str = debug_client._stop_reason_to_string(stop_reason)
+            
+            # Get current location
+            location = ""
+            frame = thread.GetFrameAtIndex(0)
+            if frame and frame.IsValid():
+                func = frame.GetFunction()
+                function_name = func.GetName() if func and func.IsValid() else "??"
+                line_entry = frame.GetLineEntry()
+                if line_entry.IsValid():
+                    file_spec = line_entry.GetFileSpec()
+                    location = f"{function_name} at {file_spec.GetFilename()}:{line_entry.GetLine()}"
+                else:
+                    location = function_name
+            
+            threads.append({
+                "index": i,
+                "thread_id": tid,
+                "name": name,
+                "stop_reason": stop_reason_str,
+                "location": location,
+                "selected": tid == selected_tid
+            })
+    
+    return {"threads": threads}
+
+
+@mcp.tool()
+async def select_thread(session_id: str, thread_index: int) -> Dict[str, Any]:
+    """Select a specific thread as the active thread."""
+    if session_id not in debug_client.sessions:
+        return {"status": "error", "error": "Session not found"}
+    
+    session = debug_client.sessions[session_id]
+    
+    if not session.process or not session.process.IsValid():
+        return {"status": "error", "error": "Process not running"}
+    
+    if thread_index >= session.process.GetNumThreads():
+        return {"status": "error", "error": f"Thread index {thread_index} out of range"}
+    
+    thread = session.process.GetThreadAtIndex(thread_index)
+    if thread and thread.IsValid():
+        session.process.SetSelectedThread(thread)
+        
+        # Update stop info for the newly selected thread
+        debug_client._update_stop_info(session)
+        
+        return {
+            "status": "selected",
+            "thread_id": thread.GetThreadID(),
+            "current_location": session.current_location
+        }
+    
+    return {"status": "error", "error": "Failed to select thread"}
 
 
 @mcp.tool()
