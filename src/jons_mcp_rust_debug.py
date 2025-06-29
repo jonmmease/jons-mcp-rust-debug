@@ -584,6 +584,45 @@ class RustDebugClient:
 debug_client = RustDebugClient()
 
 
+# Helper function for pagination
+def paginate_text(text: str, limit: Optional[int] = None, offset: Optional[int] = None) -> Dict[str, Any]:
+    """Paginate text output by character count.
+    
+    Args:
+        text: The full text to paginate
+        limit: Maximum number of characters to return (None for all)
+        offset: Starting character position (None or 0 for beginning)
+        
+    Returns:
+        Dictionary with:
+            - content: The requested text segment
+            - total_chars: Total number of characters
+            - offset: The offset used
+            - limit: The limit used
+            - has_more: Whether there's more content after this page
+    """
+    total_chars = len(text)
+    offset = offset or 0
+    
+    # If no limit, return everything from offset
+    if limit is None:
+        content = text[offset:]
+        has_more = False
+    else:
+        # Return the requested segment
+        end = offset + limit
+        content = text[offset:end]
+        has_more = end < total_chars
+    
+    return {
+        "content": content,
+        "total_chars": total_chars,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more
+    }
+
+
 # MCP Tools - Session Management
 
 @mcp.tool()
@@ -920,14 +959,20 @@ async def list_breakpoints(session_id: str) -> Dict[str, Any]:
 # MCP Tools - Execution Control
 
 @mcp.tool()
-async def run(session_id: str) -> Dict[str, Any]:
+async def run(
+    session_id: str,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None
+) -> Dict[str, Any]:
     """Start or continue program execution.
     
     Args:
         session_id: The session identifier
+        limit: Maximum number of characters to return (for pagination)
+        offset: Starting character position (for pagination)
         
     Returns:
-        Dictionary with execution status and stop reason
+        Dictionary with execution status, stop reason, and pagination info
     """
     if session_id not in debug_client.sessions:
         return {"status": "error", "error": "Session not found"}
@@ -968,11 +1013,20 @@ async def run(session_id: str) -> Dict[str, Any]:
         elif "SIGABRT" in output:
             stop_reason = "abort"
     
+    # Handle pagination
+    pagination = paginate_text(output, limit, offset)
+    
     return {
         "status": session.state.value,
         "stop_reason": stop_reason,
         "stopped_at": stopped_at,
-        "output": output
+        "output": pagination["content"],
+        "pagination": {
+            "total_chars": pagination["total_chars"],
+            "offset": pagination["offset"],
+            "limit": pagination["limit"],
+            "has_more": pagination["has_more"]
+        }
     }
 
 
@@ -1109,15 +1163,22 @@ async def finish(session_id: str) -> Dict[str, Any]:
 # MCP Tools - Stack Navigation
 
 @mcp.tool()
-async def backtrace(session_id: str, limit: Optional[int] = None) -> Dict[str, Any]:
+async def backtrace(
+    session_id: str, 
+    frame_limit: Optional[int] = None,
+    char_limit: Optional[int] = None,
+    char_offset: Optional[int] = None
+) -> Dict[str, Any]:
     """Get the current call stack (backtrace).
     
     Args:
         session_id: The session identifier
-        limit: Maximum number of frames to return
+        frame_limit: Maximum number of frames to retrieve from debugger
+        char_limit: Maximum number of characters to return (for pagination)
+        char_offset: Starting character position (for pagination)
         
     Returns:
-        Dictionary with stack frames
+        Dictionary with stack frames and pagination info
     """
     if session_id not in debug_client.sessions:
         return {"status": "error", "error": "Session not found"}
@@ -1126,9 +1187,9 @@ async def backtrace(session_id: str, limit: Optional[int] = None) -> Dict[str, A
     
     # Send backtrace command
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
-        cmd = f"backtrace {limit}" if limit else "backtrace"
+        cmd = f"backtrace {frame_limit}" if frame_limit else "backtrace"
     else:  # LLDB
-        cmd = f"thread backtrace -c {limit}" if limit else "thread backtrace"
+        cmd = f"thread backtrace -c {frame_limit}" if frame_limit else "thread backtrace"
     
     output = debug_client._send_command(session, cmd)
     
@@ -1152,7 +1213,19 @@ async def backtrace(session_id: str, limit: Optional[int] = None) -> Dict[str, A
                 "line": int(match.group(4))
             })
     
-    return {"frames": frames}
+    # Handle pagination of raw output
+    pagination = paginate_text(output, char_limit, char_offset)
+    
+    return {
+        "frames": frames,
+        "raw_output": pagination["content"],
+        "pagination": {
+            "total_chars": pagination["total_chars"],
+            "offset": pagination["offset"],
+            "limit": pagination["limit"],
+            "has_more": pagination["has_more"]
+        }
+    }
 
 
 @mcp.tool()
@@ -1246,16 +1319,24 @@ async def down(session_id: str, count: int = 1) -> Dict[str, Any]:
 # MCP Tools - Inspection
 
 @mcp.tool()
-async def list_source(session_id: str, line: Optional[int] = None, count: int = 10) -> Dict[str, Any]:
+async def list_source(
+    session_id: str, 
+    line: Optional[int] = None, 
+    count: int = 10,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None
+) -> Dict[str, Any]:
     """Show source code around current or specified line.
     
     Args:
         session_id: The session identifier
         line: Line number to center on (uses current if not specified)
         count: Number of lines to show
+        limit: Maximum number of characters to return (for pagination)
+        offset: Starting character position (for pagination)
         
     Returns:
-        Dictionary with source code
+        Dictionary with source code and pagination info
     """
     if session_id not in debug_client.sessions:
         return {"status": "error", "error": "Session not found"}
@@ -1273,22 +1354,38 @@ async def list_source(session_id: str, line: Optional[int] = None, count: int = 
     
     output = debug_client._send_command(session, cmd)
     
+    # Handle pagination
+    pagination = paginate_text(output, limit, offset)
+    
     return {
-        "source": output,
-        "current_line": session.current_frame.line if session.current_frame else None
+        "source": pagination["content"],
+        "current_line": session.current_frame.line if session.current_frame else None,
+        "pagination": {
+            "total_chars": pagination["total_chars"],
+            "offset": pagination["offset"],
+            "limit": pagination["limit"],
+            "has_more": pagination["has_more"]
+        }
     }
 
 
 @mcp.tool()
-async def print_variable(session_id: str, expression: str) -> Dict[str, Any]:
+async def print_variable(
+    session_id: str, 
+    expression: str,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None
+) -> Dict[str, Any]:
     """Print the value of a variable or expression.
     
     Args:
         session_id: The session identifier
         expression: Variable name or expression to evaluate
+        limit: Maximum number of characters to return (for pagination)
+        offset: Starting character position (for pagination)
         
     Returns:
-        Dictionary with the value and type
+        Dictionary with the value, type, and pagination info
     """
     if session_id not in debug_client.sessions:
         return {"status": "error", "error": "Session not found"}
@@ -1305,22 +1402,46 @@ async def print_variable(session_id: str, expression: str) -> Dict[str, Any]:
     else:  # LLDB
         type_output = debug_client._send_command(session, f"expression -T -- {expression}")
     
+    # Paginate both outputs
+    value_pagination = paginate_text(output, limit, offset)
+    type_pagination = paginate_text(type_output, limit, offset)
+    
     return {
-        "value": output,
-        "type": type_output,
-        "expression": expression
+        "value": value_pagination["content"],
+        "type": type_pagination["content"],
+        "expression": expression,
+        "pagination": {
+            "value": {
+                "total_chars": value_pagination["total_chars"],
+                "offset": value_pagination["offset"],
+                "limit": value_pagination["limit"],
+                "has_more": value_pagination["has_more"]
+            },
+            "type": {
+                "total_chars": type_pagination["total_chars"],
+                "offset": type_pagination["offset"],
+                "limit": type_pagination["limit"],
+                "has_more": type_pagination["has_more"]
+            }
+        }
     }
 
 
 @mcp.tool()
-async def list_locals(session_id: str) -> Dict[str, Any]:
+async def list_locals(
+    session_id: str,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None
+) -> Dict[str, Any]:
     """List all local variables in the current scope.
     
     Args:
         session_id: The session identifier
+        limit: Maximum number of characters to return (for pagination)
+        offset: Starting character position (for pagination)
         
     Returns:
-        Dictionary with local variables
+        Dictionary with local variables and pagination info
     """
     if session_id not in debug_client.sessions:
         return {"status": "error", "error": "Session not found"}
@@ -1333,18 +1454,35 @@ async def list_locals(session_id: str) -> Dict[str, Any]:
     else:  # LLDB
         output = debug_client._send_command(session, "frame variable")
     
-    return {"locals": output}
+    # Handle pagination
+    pagination = paginate_text(output, limit, offset)
+    
+    return {
+        "locals": pagination["content"],
+        "pagination": {
+            "total_chars": pagination["total_chars"],
+            "offset": pagination["offset"],
+            "limit": pagination["limit"],
+            "has_more": pagination["has_more"]
+        }
+    }
 
 
 @mcp.tool()
-async def check_debug_info(session_id: str) -> Dict[str, Any]:
+async def check_debug_info(
+    session_id: str,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None
+) -> Dict[str, Any]:
     """Check debug symbol and source mapping information.
     
     Args:
         session_id: The session identifier
+        limit: Maximum number of characters to return per field (for pagination)
+        offset: Starting character position (for pagination)
         
     Returns:
-        Dictionary with debug information
+        Dictionary with debug information and pagination info
     """
     if session_id not in debug_client.sessions:
         return {"status": "error", "error": "Session not found"}
@@ -1352,20 +1490,71 @@ async def check_debug_info(session_id: str) -> Dict[str, Any]:
     session = debug_client.sessions[session_id]
     
     info = {}
+    pagination_info = {}
     
     # Check loaded images/modules
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
         # GDB commands
-        info["loaded_files"] = debug_client._send_command(session, "info files")
-        info["sources"] = debug_client._send_command(session, "info sources")
+        loaded_files = debug_client._send_command(session, "info files")
+        sources = debug_client._send_command(session, "info sources")
+        
+        # Paginate each output
+        loaded_files_page = paginate_text(loaded_files, limit, offset)
+        sources_page = paginate_text(sources, limit, offset)
+        
+        info["loaded_files"] = loaded_files_page["content"]
+        info["sources"] = sources_page["content"]
+        
+        pagination_info["loaded_files"] = {
+            "total_chars": loaded_files_page["total_chars"],
+            "offset": loaded_files_page["offset"],
+            "limit": loaded_files_page["limit"],
+            "has_more": loaded_files_page["has_more"]
+        }
+        pagination_info["sources"] = {
+            "total_chars": sources_page["total_chars"],
+            "offset": sources_page["offset"],
+            "limit": sources_page["limit"],
+            "has_more": sources_page["has_more"]
+        }
     else:  # LLDB
         # LLDB commands
-        info["images"] = debug_client._send_command(session, "image list")
-        info["source_map"] = debug_client._send_command(session, "settings show target.source-map")
-        # Try to get current source info
-        info["source_info"] = debug_client._send_command(session, "source info")
+        images = debug_client._send_command(session, "image list")
+        source_map = debug_client._send_command(session, "settings show target.source-map")
+        source_info = debug_client._send_command(session, "source info")
+        
+        # Paginate each output
+        images_page = paginate_text(images, limit, offset)
+        source_map_page = paginate_text(source_map, limit, offset)
+        source_info_page = paginate_text(source_info, limit, offset)
+        
+        info["images"] = images_page["content"]
+        info["source_map"] = source_map_page["content"]
+        info["source_info"] = source_info_page["content"]
+        
+        pagination_info["images"] = {
+            "total_chars": images_page["total_chars"],
+            "offset": images_page["offset"],
+            "limit": images_page["limit"],
+            "has_more": images_page["has_more"]
+        }
+        pagination_info["source_map"] = {
+            "total_chars": source_map_page["total_chars"],
+            "offset": source_map_page["offset"],
+            "limit": source_map_page["limit"],
+            "has_more": source_map_page["has_more"]
+        }
+        pagination_info["source_info"] = {
+            "total_chars": source_info_page["total_chars"],
+            "offset": source_info_page["offset"],
+            "limit": source_info_page["limit"],
+            "has_more": source_info_page["has_more"]
+        }
     
-    return {"debug_info": info}
+    return {
+        "debug_info": info,
+        "pagination": pagination_info
+    }
 
 
 @mcp.tool()

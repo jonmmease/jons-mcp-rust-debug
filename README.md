@@ -58,6 +58,37 @@ claude mcp add jons-mcp-rust-debug uvx -- --from git+https://github.com/jonmmeas
 
 The server will be available in Claude Code for debugging Rust applications.
 
+## Pagination Support
+
+Many tools support pagination to handle large outputs efficiently. Pagination works with character-based `limit` and `offset` parameters:
+
+- `limit`: Maximum number of characters to return
+- `offset`: Starting character position (0-based)
+
+Tools with pagination support return a `pagination` object containing:
+- `total_chars`: Total characters available
+- `offset`: Current offset
+- `limit`: Limit used
+- `has_more`: Whether more content is available
+
+Supported tools:
+- `backtrace` - Stack traces can be very long
+- `run` - Program output can be extensive
+- `list_source` - Source files can be large
+- `print_variable` - Complex data structures may have long representations
+- `list_locals` - Many local variables can produce long output
+- `check_debug_info` - Debug information can be very detailed
+
+Example usage:
+```python
+# Get first 1000 characters of backtrace
+result = await backtrace(session_id="session_1", char_limit=1000, char_offset=0)
+
+# Get next page if more content available
+if result["pagination"]["has_more"]:
+    next_result = await backtrace(session_id="session_1", char_limit=1000, char_offset=1000)
+```
+
 ## Configuration
 
 Create a `rustdebugconfig.json` file in your project root:
@@ -158,11 +189,14 @@ Start or continue program execution.
 ```
 Args:
   session_id: The session identifier
+  limit: Max characters to return (optional, for pagination)
+  offset: Starting character position (optional, for pagination)
 Returns:
   status: Current execution state
   stop_reason: "breakpoint", "signal", "exited", etc.
   stopped_at: Location where execution stopped
   output: Debugger output
+  pagination: Pagination info (if limit specified)
 ```
 
 #### step
@@ -202,9 +236,13 @@ Get current stack trace.
 ```
 Args:
   session_id: The session identifier
-  limit: Maximum frames to return (optional)
+  frame_limit: Maximum frames to return (optional)
+  char_limit: Max characters to return (optional, for pagination)
+  char_offset: Starting character position (optional, for pagination)
 Returns:
   frames: Array of stack frames
+  raw_output: Raw debugger output (paginated if limit specified)
+  pagination: Pagination info (if char_limit specified)
 ```
 
 #### up
