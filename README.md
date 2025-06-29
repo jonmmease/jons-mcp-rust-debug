@@ -276,6 +276,20 @@ Returns:
   expression: The evaluated expression
 ```
 
+#### check_debug_info
+Check debug symbol and source mapping information.
+```
+Args:
+  session_id: The session identifier
+Returns:
+  debug_info: Dictionary containing:
+    - images: Loaded binary images (LLDB)
+    - source_map: Source mapping settings (LLDB)
+    - source_info: Current source information (LLDB)
+    - loaded_files: Loaded files (GDB)
+    - sources: Available source files (GDB)
+```
+
 ## Platform Support
 
 - **Linux**: Best GDB support, rust-gdb recommended

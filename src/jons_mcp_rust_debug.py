@@ -543,6 +543,11 @@ class RustDebugClient:
                 else:
                     self._send_command(session, f"settings set target.run-args {args_str}")
             
+            # For LLDB, set the working directory to help with source resolution
+            if session.debugger_type in [DebuggerType.LLDB, DebuggerType.RUST_LLDB]:
+                self._send_command(session, f"settings set target.run-args {' '.join(args) if args else ''}")
+                self._send_command(session, f"platform settings -w {self.config.working_directory}")
+            
             session.state = DebuggerState.PAUSED
             self.sessions[session_id] = session
             
@@ -693,34 +698,91 @@ async def set_breakpoint(
     
     session = debug_client.sessions[session_id]
     
+    # Try to normalize the file path for better compatibility
+    if file and not function:
+        # If file doesn't start with /, try to make it relative to working directory
+        if not file.startswith('/'):
+            # Try different path formats
+            possible_paths = [
+                file,  # As provided
+                f"./{file}",  # Relative with ./
+                str(Path(debug_client.config.working_directory) / file),  # Full path
+            ]
+            
+            # For workspace projects, also try without package prefix
+            if '/' in file and file.count('/') > 1:
+                # e.g., "vegafusion-runtime/src/..." -> "src/..."
+                parts = file.split('/', 1)
+                if len(parts) == 2:
+                    possible_paths.append(parts[1])
+        else:
+            possible_paths = [file]
+    else:
+        possible_paths = None
+    
     # Build breakpoint command
+    commands_to_try = []
+    
     if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
         if function:
-            cmd = f"{'tbreak' if temporary else 'break'} {function}"
+            base_cmd = f"{'tbreak' if temporary else 'break'} {function}"
+            if condition:
+                base_cmd += f" if {condition}"
+            commands_to_try.append(base_cmd)
         elif file and line:
-            cmd = f"{'tbreak' if temporary else 'break'} {file}:{line}"
-        else:
-            return {"status": "error", "error": "Must specify either function or file:line"}
-        
-        if condition:
-            cmd += f" if {condition}"
+            for path in possible_paths:
+                base_cmd = f"{'tbreak' if temporary else 'break'} {path}:{line}"
+                if condition:
+                    base_cmd += f" if {condition}"
+                commands_to_try.append(base_cmd)
     else:  # LLDB
         if function:
-            cmd = f"breakpoint set --name {function}"
+            base_cmd = f"breakpoint set --name {function}"
+            if condition:
+                base_cmd += f" --condition '{condition}'"
+            if temporary:
+                base_cmd += " --one-shot true"
+            commands_to_try.append(base_cmd)
+            
+            # Also try with regex for LLDB
+            regex_cmd = f"breakpoint set --func-regex {function}"
+            if condition:
+                regex_cmd += f" --condition '{condition}'"
+            if temporary:
+                regex_cmd += " --one-shot true"
+            commands_to_try.append(regex_cmd)
         elif file and line:
-            cmd = f"breakpoint set --file {file} --line {line}"
-        else:
-            return {"status": "error", "error": "Must specify either function or file:line"}
-        
-        if condition:
-            cmd += f" --condition '{condition}'"
-        if temporary:
-            cmd += " --one-shot true"
+            for path in possible_paths:
+                base_cmd = f"breakpoint set --file {path} --line {line}"
+                if condition:
+                    base_cmd += f" --condition '{condition}'"
+                if temporary:
+                    base_cmd += " --one-shot true"
+                commands_to_try.append(base_cmd)
+                
+                # Also try the simpler format
+                simple_cmd = f"b {path}:{line}"
+                commands_to_try.append(simple_cmd)
     
-    # Send command
-    logger.info(f"Setting breakpoint with command: {cmd}")
-    output = debug_client._send_command(session, cmd)
-    logger.debug(f"Breakpoint command output: {output}")
+    # Try each command until one succeeds
+    output = ""
+    successful_cmd = None
+    all_outputs = []
+    
+    for cmd in commands_to_try:
+        logger.info(f"Trying breakpoint command: {cmd}")
+        try:
+            output = debug_client._send_command(session, cmd)
+            logger.debug(f"Breakpoint command output: {output}")
+            all_outputs.append((cmd, output))
+            
+            # Check if this command succeeded by looking for breakpoint ID
+            if "Breakpoint" in output and (":" in output or "at" in output):
+                successful_cmd = cmd
+                break
+        except Exception as e:
+            logger.error(f"Command failed: {cmd}, error: {e}")
+            all_outputs.append((cmd, str(e)))
     
     # Parse breakpoint ID
     breakpoint_id = None
@@ -743,10 +805,34 @@ async def set_breakpoint(
     
     if breakpoint_id is None:
         # Log the full output for debugging
-        logger.error(f"Failed to parse breakpoint ID. Command: {cmd}")
-        logger.error(f"Output: {repr(output)}")
-        logger.error(f"Output lines: {output.strip().split(chr(10))}")
-        return {"status": "error", "error": f"Failed to parse breakpoint ID. The debugger may need more time to initialize or the file/line may not be valid."}
+        logger.error(f"Failed to parse breakpoint ID from any command")
+        logger.error(f"All attempts:")
+        for cmd, out in all_outputs:
+            logger.error(f"  Command: {cmd}")
+            logger.error(f"  Output: {repr(out)}")
+        
+        # Build detailed error message
+        error_details = {
+            "error": "Failed to set breakpoint",
+            "attempted_commands": [cmd for cmd, _ in all_outputs],
+            "responses": [out for _, out in all_outputs],
+            "suggestions": [
+                "Ensure the file path is correct relative to the project root",
+                "Check that debug symbols are included (use 'cargo build' not 'cargo build --release' unless you added debug symbols)",
+                "For workspace projects, try using just 'src/...' without the package name",
+                "Verify the line number contains executable code (not comments or blank lines)"
+            ]
+        }
+        
+        # Try to provide more specific guidance based on the output
+        if any("No source file named" in out for _, out in all_outputs):
+            error_details["likely_cause"] = "Source file not found. Check the path format."
+        elif any("No locations found" in out for _, out in all_outputs):
+            error_details["likely_cause"] = "No executable code at specified line or function not found."
+        elif any("pending" in out.lower() for _, out in all_outputs):
+            error_details["likely_cause"] = "Breakpoint is pending. The binary might not have debug symbols."
+        
+        return {"status": "error", **error_details}
     
     # Store breakpoint info
     bp = Breakpoint(
@@ -1248,6 +1334,38 @@ async def list_locals(session_id: str) -> Dict[str, Any]:
         output = debug_client._send_command(session, "frame variable")
     
     return {"locals": output}
+
+
+@mcp.tool()
+async def check_debug_info(session_id: str) -> Dict[str, Any]:
+    """Check debug symbol and source mapping information.
+    
+    Args:
+        session_id: The session identifier
+        
+    Returns:
+        Dictionary with debug information
+    """
+    if session_id not in debug_client.sessions:
+        return {"status": "error", "error": "Session not found"}
+    
+    session = debug_client.sessions[session_id]
+    
+    info = {}
+    
+    # Check loaded images/modules
+    if session.debugger_type in [DebuggerType.GDB, DebuggerType.RUST_GDB]:
+        # GDB commands
+        info["loaded_files"] = debug_client._send_command(session, "info files")
+        info["sources"] = debug_client._send_command(session, "info sources")
+    else:  # LLDB
+        # LLDB commands
+        info["images"] = debug_client._send_command(session, "image list")
+        info["source_map"] = debug_client._send_command(session, "settings show target.source-map")
+        # Try to get current source info
+        info["source_info"] = debug_client._send_command(session, "source info")
+    
+    return {"debug_info": info}
 
 
 @mcp.tool()
