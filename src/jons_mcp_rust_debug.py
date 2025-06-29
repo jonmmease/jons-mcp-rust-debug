@@ -96,6 +96,7 @@ class DebugSession:
     current_location: Optional[str] = None
     output_buffer: str = ""
     created_time: float = field(default_factory=time.time)
+    stopping: bool = False  # Flag to signal graceful shutdown
 
 
 class RustDebugClient:
@@ -243,7 +244,7 @@ class RustDebugClient:
     def _event_handler_thread(self, session: DebugSession):
         """Thread to handle LLDB events"""
         try:
-            while session.state not in (DebuggerState.FINISHED, DebuggerState.ERROR):
+            while not session.stopping and session.state not in (DebuggerState.FINISHED, DebuggerState.ERROR):
                 # Check if process is still valid
                 if not session.process or not session.process.IsValid():
                     break
@@ -388,8 +389,8 @@ class RustDebugClient:
             return
         
         try:
-            # Mark session as finished to signal event thread to exit
-            session.state = DebuggerState.FINISHED
+            # Signal event thread to exit gracefully
+            session.stopping = True
             
             # Stop the process if it's running
             if session.process and session.process.IsValid():
@@ -723,6 +724,7 @@ async def run(
         session.state = DebuggerState.IDLE
         session.last_stop_reason = ""
         session.current_location = None
+        session.stopping = False  # Reset stopping flag
         
         # Launch the process
         error = lldb.SBError()
