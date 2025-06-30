@@ -533,15 +533,16 @@ If you're experiencing issues with the debugger not working as expected:
 # Install development dependencies
 uv pip install -e ".[dev]"
 
-# Run tests
-uv run python -m pytest
-
 # Format code
-uv run black src/ tests/
+uv run black src/
 
 # Lint code
-uv run ruff check src/ tests/
+uv run ruff check src/
 ```
+
+### Testing
+
+The test suite needs to be rewritten for the LLDB Python API implementation. The previous tests were written for the subprocess-based approach and are no longer applicable.
 
 ## License
 
