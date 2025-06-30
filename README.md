@@ -17,6 +17,38 @@ This implementation uses LLDB's Python API for direct debugging control:
 - Sessions are managed independently, allowing multiple concurrent debugging sessions
 - Direct access to debugging objects (breakpoints, variables, frames)
 
+## How It Works
+
+The server uses the `lldb-python` package to provide direct access to LLDB's debugging capabilities through its Python API:
+
+1. **Session Creation**: When you start debugging, the server:
+   - Builds your Rust target using `cargo build`
+   - Creates an LLDB debugger instance (`lldb.SBDebugger`)
+   - Loads the compiled binary as a target
+   - Sets up an event listener for asynchronous debugging events
+
+2. **Event-Driven Control**: A background thread monitors LLDB events:
+   - Process state changes (running, stopped, exited)
+   - Breakpoint hits
+   - Thread state updates
+   - The event handler updates session state in real-time
+
+3. **Direct API Access**: All debugging operations use LLDB's structured API:
+   - Breakpoints: `target.BreakpointCreateByLocation()`
+   - Execution: `process.Continue()`, `thread.StepOver()`
+   - Inspection: `frame.EvaluateExpression()`, `value.GetSummary()`
+   - No text parsing or command interpretation needed
+
+4. **Multi-threaded Debugging**: The server properly handles multi-threaded programs:
+   - Automatically selects the thread that hit a breakpoint
+   - Allows manual thread switching
+   - Maintains correct context for variable inspection
+
+5. **Clean Shutdown**: Sessions can be stopped gracefully:
+   - Process termination handled in background thread
+   - Resources cleaned up without blocking
+   - Event threads exit cleanly
+
 ## Features
 
 - **LLDB Python API**: Direct, reliable debugging through LLDB's native Python bindings
@@ -441,36 +473,17 @@ await start_debug(
 )
 ```
 
-## Recent Improvements
+## Technical Implementation
 
-This implementation uses LLDB's Python API for direct, reliable debugging:
+### LLDB Python API Benefits
 
-### Key Benefits
+The server leverages LLDB's Python API (via the `lldb-python` package) which provides several advantages:
 
-1. **Direct API Access**:
-   - No subprocess or PTY communication needed
-   - Direct access to debugging objects and state
-   - Type-safe Python bindings
-   - Used by professional tools like CodeLLDB
-
-2. **Reliable Operation**:
-   - ✅ Variable dereferencing works correctly
-   - ✅ Stop reasons are always accurate
-   - ✅ Source listing shows proper code
-   - ✅ Type information is complete
-   - ✅ No command echo or parsing issues
-
-3. **Better Performance**:
-   - No PTY overhead or terminal emulation
-   - Direct API calls are faster
-   - Event-driven architecture
-   - Non-blocking operations
-
-4. **Enhanced Features**:
-   - Rich object inspection
-   - Accurate breakpoint management
-   - Proper thread and frame navigation
-   - Direct expression evaluation
+- **Type-safe bindings**: Direct access to LLDB objects without text parsing
+- **Reliable operation**: No issues with command echoing or output capture
+- **Better performance**: No subprocess overhead or PTY emulation
+- **Rich functionality**: Full access to LLDB's debugging capabilities
+- **Professional-grade**: Same approach used by tools like CodeLLDB
 
 ## Limitations
 
