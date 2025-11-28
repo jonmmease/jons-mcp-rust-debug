@@ -267,7 +267,7 @@ class TestPrintSlice:
         ):
             from src.jons_mcp_rust_debug.tools.inspection import print_slice
 
-            result = await print_slice("nonexistent", "my_slice")
+            result = await print_slice("nonexistent", "my_slice", count=10)
 
         assert result["status"] == "error"
 
@@ -285,7 +285,7 @@ class TestPrintSlice:
         ):
             from src.jons_mcp_rust_debug.tools.inspection import print_slice
 
-            result = await print_slice("test_session_1", "my_slice")
+            result = await print_slice("test_session_1", "my_slice", count=10)
 
         assert result["status"] == "error"
         assert "not paused" in result["error"].lower()

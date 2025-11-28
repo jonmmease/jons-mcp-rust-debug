@@ -475,21 +475,25 @@ async def set_variable(
 async def print_slice(
     session_id: str,
     expression: str,
+    count: int,
     start: int = 0,
-    count: int | None = None,
     limit: int | None = None,
     offset: int | None = None,
 ) -> dict[str, Any]:
     """Print elements of a Rust slice, Vec, or Box<[T]>.
 
-    This is a convenience wrapper that automatically extracts the data pointer
-    and length from Rust slice types and delegates to print_array.
+    This tool automatically extracts the data pointer from Rust slice types
+    (Vec<T>, &[T], Box<[T]>, [T; N]) and uses print_array internally.
+
+    When to use print_slice vs print_array:
+    - print_slice: For Rust types (Vec, &[T], Box<[T]>, arrays)
+    - print_array: For raw pointers or when you have a pointer expression
 
     Args:
         session_id: The session identifier
-        expression: Slice expression (e.g., "my_slice", "&vec[..]", "numbers")
+        expression: Slice expression (e.g., "my_vec", "&slice[..]", "my_array")
+        count: Number of elements to print (required)
         start: Starting index (default 0)
-        count: Number of elements to print (None = use slice's length)
         limit: Character limit for pagination
         offset: Character offset for pagination
 
@@ -572,18 +576,7 @@ async def print_slice(
             except ValueError:
                 pass
 
-    # Determine count to use
-    actual_count = count
-    if actual_count is None:
-        if detected_length is not None:
-            actual_count = detected_length - start
-            if actual_count < 0:
-                actual_count = 0
-        else:
-            return {
-                "status": "error",
-                "error": f"Cannot determine slice length for '{expression}'. Please provide 'count' parameter.",
-            }
+    # Use the provided count (required parameter)
 
     # If start is beyond the length, return empty
     if detected_length is not None and start >= detected_length:
@@ -606,7 +599,7 @@ async def print_slice(
     array_result = await print_array(
         session_id=session_id,
         expression=data_ptr_expr,
-        count=actual_count,
+        count=count,
         start=start if data_ptr_expr != expression else 0,  # Only apply start if we have data_ptr
         element_type=None,
         limit=limit,
@@ -621,7 +614,7 @@ async def print_slice(
         "output": array_result.get("output", ""),
         "expression": expression,
         "start": start,
-        "count": actual_count,
+        "count": count,
         "detected_length": detected_length,
         "detected_type": type_name,
         "data_ptr_expression": data_ptr_expr,

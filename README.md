@@ -478,12 +478,15 @@ Returns:
 
 #### print_slice
 Print elements of a Rust slice, Vec, or Box<[T]>.
+
+Use print_slice for Rust types (Vec, &[T], Box<[T]>, arrays).
+Use print_array for raw pointers or pointer expressions.
 ```
 Args:
   session_id: The session identifier
-  expression: Slice expression (e.g., "my_slice", "&vec[..]", "numbers")
+  expression: Slice expression (e.g., "my_vec", "&slice[..]", "my_array")
+  count: Number of elements to print (required)
   start: Starting index (default: 0)
-  count: Number of elements to print (None = use slice's length)
   limit: Max characters to return (optional, for pagination)
   offset: Starting character position (optional, for pagination)
 Returns:
@@ -491,7 +494,7 @@ Returns:
   expression: The evaluated expression
   start: Starting index used
   count: Number of elements printed
-  detected_length: Total length of the slice
+  detected_length: Total length of the slice (if detectable)
   detected_type: Rust type of the slice
   data_ptr_expression: Internal pointer expression used
   pagination: Pagination info (if limit specified)
