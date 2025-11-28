@@ -23,37 +23,52 @@ async def start_debug(
             - "binary": Debug a binary target
             - "test": Debug a test (lib test or integration test)
             - "example": Debug an example
-        target: The target to debug. For tests, this can be:
-            - A test function path like "module::tests::test_name" for lib tests
-            - A test file name for integration tests in tests/ directory
-            - Empty/None to build all lib tests
-        args: Command line arguments to pass to the program. For tests, include
-            the test name filter, e.g., ["module::tests::test_name", "--exact"]
+        target: The target to debug:
+            - For binaries/examples: the target name
+            - For integration tests (tests/ dir): the file name without .rs
+            - For lib tests: can be empty to build all tests
+        args: Command line arguments to pass to the program. For tests, this is
+            the test filter. IMPORTANT: Use the full module path for tests inside
+            a module. Run `cargo test --test <file> -- --list` to see the correct
+            filter format. Examples:
+            - Test directly in file: ["test_name", "--exact"]
+            - Test in mod tests {}: ["tests::test_name", "--exact"]
         cargo_flags: Additional cargo build flags (e.g., ["--release"])
         env: Environment variables for the build process
         package: Package name for workspace projects (e.g., "my-crate")
-        working_directory: Absolute path to the Rust project directory (where
-            Cargo.toml is located). Required for workspace projects.
+        working_directory: Absolute path to the Rust project directory:
+            - Single crate: The project root (where Cargo.toml is)
+            - Workspace: The individual crate directory, NOT the workspace root.
+              Using workspace root may cause breakpoint resolution issues.
 
     Returns:
         Dictionary with session_id and status
 
-    Examples:
-        # Debug a binary
-        start_debug(target_type="binary", target="my_app",
-                    working_directory="/path/to/project")
+    Notes:
+        - Async tests (#[tokio::test], #[async_std::test]) are fully supported
+        - The debugger automatically handles breakpoints on spawned threads
 
-        # Debug a lib test in a workspace
+    Examples:
+        # Single crate - debug a binary
+        start_debug(target_type="binary", target="my_app",
+                    working_directory="/path/to/my-project")
+
+        # Single crate - debug an integration test
+        start_debug(target_type="test", target="my_test",
+                    args=["test_name", "--exact"],
+                    working_directory="/path/to/my-project")
+
+        # Workspace - debug integration test (use crate dir, not workspace root!)
+        start_debug(target_type="test", target="my_test",
+                    args=["tests::test_name", "--exact"],
+                    working_directory="/path/to/workspace/my-crate")
+
+        # Workspace - debug lib test with package specified
         start_debug(target_type="test",
                     target="utils::tests::test_parsing",
                     package="my-crate",
                     args=["utils::tests::test_parsing", "--exact"],
-                    working_directory="/path/to/workspace")
-
-        # Debug an integration test
-        start_debug(target_type="test", target="integration_tests",
-                    args=["test_feature", "--exact"],
-                    working_directory="/path/to/project")
+                    working_directory="/path/to/workspace/my-crate")
     """
     try:
         client = ensure_debug_client()

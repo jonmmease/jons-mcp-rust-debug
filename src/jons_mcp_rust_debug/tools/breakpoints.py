@@ -22,14 +22,25 @@ async def set_breakpoint(
 
     Args:
         session_id: The session identifier
-        file: Source file path
+        file: Source file name. RECOMMENDED: Use filename only (e.g., "test_data.rs")
+            rather than full paths. Absolute paths may cause resolution issues.
         line: Line number
-        function: Function name
+        function: Function name (alternative to file/line)
         condition: Conditional expression
         temporary: If true, breakpoint is removed after first hit
 
     Returns:
         Dictionary with breakpoint details
+
+    Examples:
+        # Recommended - filename only
+        set_breakpoint(session_id, file="my_test.rs", line=25)
+
+        # Also works - relative path
+        set_breakpoint(session_id, file="tests/my_test.rs", line=25)
+
+        # By function name
+        set_breakpoint(session_id, function="my_module::my_function")
     """
     client = ensure_debug_client()
 
