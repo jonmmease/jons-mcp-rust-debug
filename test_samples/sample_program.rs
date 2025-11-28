@@ -83,7 +83,47 @@ fn main() {
     let numbers = vec![1, 2, 3, 4, 5];
     let sum = process_numbers(numbers);
     println!("Sum of numbers is {}", sum);
-    
+
+    // Test data for debugging tools
+    // Fixed-size array for print_array testing
+    let fixed_array: [i32; 5] = [10, 20, 30, 40, 50];
+    println!("Fixed array: {:?}", fixed_array);
+
+    // Slice reference for print_array testing
+    let slice: &[i32] = &fixed_array[1..4];
+    println!("Slice (elements 1-3): {:?}", slice);
+
+    // Mutable variable for watchpoint testing
+    let mut watch_counter = 0;
+    println!("Initial watch_counter: {}", watch_counter);
+
+    // Loop to modify watch_counter (for watchpoint testing)
+    for i in 1..=5 {
+        watch_counter += i;
+        println!("Loop iteration {}: watch_counter = {}", i, watch_counter);
+    }
+
+    // Mutable variable for set_variable testing
+    let mut test_value = 42;
+    println!("Initial test_value: {}", test_value);
+
+    // Multiple distinct lines for continue_to_line testing
+    test_value += 10;
+    println!("After adding 10: test_value = {}", test_value);
+
+    test_value *= 2;
+    println!("After multiplying by 2: test_value = {}", test_value);
+
+    test_value -= 20;
+    println!("After subtracting 20: test_value = {}", test_value);
+
+    // Use all variables to prevent optimization
+    let array_sum: i32 = fixed_array.iter().sum();
+    let slice_sum: i32 = slice.iter().sum();
+    let combined_result = array_sum + slice_sum + watch_counter + test_value;
+    println!("Combined result: {} + {} + {} + {} = {}",
+             array_sum, slice_sum, watch_counter, test_value, combined_result);
+
     // Test division
     match divide(10, 2) {
         Ok(result) => println!("10 / 2 = {}", result),

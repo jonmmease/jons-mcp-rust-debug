@@ -278,3 +278,352 @@ async def evaluate(session_id: str, expression: str) -> dict[str, Any]:
         "error": None,
         "expression": expression,
     }
+
+
+async def print_array(
+    session_id: str,
+    expression: str,
+    count: int,
+    start: int = 0,
+    element_type: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> dict[str, Any]:
+    """Print elements of an array or pointer range using LLDB's parray command.
+
+    Args:
+        session_id: The session identifier
+        expression: Array/pointer expression to index (e.g., "arr", "ptr", "&vec[0]")
+        count: Number of elements to print
+        start: Starting index (default 0)
+        element_type: Optional type for pointer casting (e.g., "i32")
+        limit: Character limit for pagination
+        offset: Character offset for pagination
+
+    Returns:
+        Dictionary with array elements output and pagination info
+    """
+    client = ensure_debug_client()
+
+    try:
+        session = validate_session(client.sessions, session_id)
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    if session.state != DebuggerState.PAUSED:
+        return {
+            "status": "error",
+            "error": f"Cannot print array: debugger is {session.state.value}, not paused",
+        }
+
+    try:
+        thread = get_active_thread(session.process)
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    frame = thread.GetSelectedFrame()
+    if not frame or not frame.IsValid():
+        return {"status": "error", "error": "No active frame"}
+
+    # Build the parray command
+    adjusted_expression = expression
+
+    # Apply type cast if provided
+    if element_type:
+        adjusted_expression = f"({element_type}*)({adjusted_expression})"
+
+    # Apply offset if start > 0
+    if start > 0:
+        adjusted_expression = f"({adjusted_expression})+{start}"
+
+    command = f"parray {count} {adjusted_expression}"
+
+    # Get command interpreter and execute
+    interpreter = session.debugger.GetCommandInterpreter()
+    result = lldb.SBCommandReturnObject()
+    interpreter.HandleCommand(command, result)
+
+    if not result.Succeeded():
+        error_msg = result.GetError() or "parray command failed"
+        return {
+            "status": "error",
+            "error": error_msg,
+            "expression": expression,
+            "start": start,
+            "count": count,
+        }
+
+    # Get output
+    output = result.GetOutput() or ""
+
+    # Handle pagination
+    pagination = paginate_text(output, limit, offset)
+
+    return {
+        "output": pagination["content"],
+        "expression": expression,
+        "start": start,
+        "count": count,
+        "element_type": element_type,
+        "pagination": {
+            "total_chars": pagination["total_chars"],
+            "offset": pagination["offset"],
+            "limit": pagination["limit"],
+            "has_more": pagination["has_more"],
+        },
+    }
+
+
+async def set_variable(
+    session_id: str,
+    variable: str,
+    value: str,
+    frame_index: int = 0,
+) -> dict[str, Any]:
+    """Set a variable to a new value.
+
+    Args:
+        session_id: The session identifier
+        variable: Variable name or path (e.g., "x", "config.timeout")
+        value: New value as string (e.g., "42", "true", "3.14")
+        frame_index: Stack frame index (0 = current frame)
+
+    Returns:
+        Dictionary with old_value, new_value, type, and status
+    """
+    client = ensure_debug_client()
+
+    try:
+        session = validate_session(client.sessions, session_id)
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    if session.state != DebuggerState.PAUSED:
+        return {
+            "status": "error",
+            "error": f"Cannot set variable: debugger is {session.state.value}, not paused",
+        }
+
+    try:
+        thread = get_active_thread(session.process)
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    # Get the frame at the specified index
+    frame = thread.GetFrameAtIndex(frame_index)
+    if not frame or not frame.IsValid():
+        return {
+            "status": "error",
+            "error": f"Invalid frame at index {frame_index}",
+        }
+
+    # Get old value first
+    old_result = frame.EvaluateExpression(variable)
+    if not old_result or not old_result.IsValid():
+        return {
+            "status": "error",
+            "error": f"Variable '{variable}' not found",
+        }
+
+    # Check if there was an error evaluating the variable
+    if old_result.GetError().Fail():
+        error_msg = old_result.GetError().GetCString()
+        return {
+            "status": "error",
+            "error": f"Failed to access variable '{variable}': {error_msg}",
+        }
+
+    old_value = old_result.GetValue() or str(old_result)
+    type_name = old_result.GetTypeName() or "unknown"
+
+    # Set new value using assignment expression
+    assign_expr = f"{variable} = {value}"
+    options = lldb.SBExpressionOptions()
+    result = frame.EvaluateExpression(assign_expr, options)
+
+    if not result or result.GetError().Fail():
+        error_msg = result.GetError().GetCString() if result else "Unknown error"
+        # Common errors include type mismatches, const variables, optimized out variables
+        return {
+            "status": "error",
+            "error": f"Failed to set variable '{variable}': {error_msg}",
+            "old_value": old_value,
+            "type": type_name,
+        }
+
+    # Verify the new value was set
+    verify = frame.EvaluateExpression(variable)
+    if not verify or verify.GetError().Fail():
+        return {
+            "status": "error",
+            "error": f"Assignment succeeded but verification failed for '{variable}'",
+            "old_value": old_value,
+            "type": type_name,
+        }
+
+    new_value = verify.GetValue() or str(verify)
+
+    return {
+        "status": "success",
+        "variable": variable,
+        "old_value": old_value,
+        "new_value": new_value,
+        "type": type_name,
+    }
+
+
+async def print_slice(
+    session_id: str,
+    expression: str,
+    start: int = 0,
+    count: int | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> dict[str, Any]:
+    """Print elements of a Rust slice, Vec, or Box<[T]>.
+
+    This is a convenience wrapper that automatically extracts the data pointer
+    and length from Rust slice types and delegates to print_array.
+
+    Args:
+        session_id: The session identifier
+        expression: Slice expression (e.g., "my_slice", "&vec[..]", "numbers")
+        start: Starting index (default 0)
+        count: Number of elements to print (None = use slice's length)
+        limit: Character limit for pagination
+        offset: Character offset for pagination
+
+    Returns:
+        Dictionary with slice elements output and pagination info
+    """
+    client = ensure_debug_client()
+
+    try:
+        session = validate_session(client.sessions, session_id)
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    if session.state != DebuggerState.PAUSED:
+        return {
+            "status": "error",
+            "error": f"Cannot print slice: debugger is {session.state.value}, not paused",
+        }
+
+    try:
+        thread = get_active_thread(session.process)
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    frame = thread.GetSelectedFrame()
+    if not frame or not frame.IsValid():
+        return {"status": "error", "error": "No active frame"}
+
+    # Evaluate the expression to get the slice/vec value
+    result = frame.EvaluateExpression(expression)
+    if not result or result.GetError().Fail():
+        error_msg = result.GetError().GetCString() if result else "Unknown error"
+        return {
+            "status": "error",
+            "error": f"Failed to evaluate expression '{expression}': {error_msg}",
+        }
+
+    type_name = result.GetTypeName() or ""
+
+    # Try to extract data pointer and length based on the type
+    data_ptr_expr = None
+    length_expr = None
+    detected_length = None
+
+    # Handle Vec<T>
+    if "Vec<" in type_name or "vec::Vec<" in type_name:
+        # Vec has buf.ptr.pointer and len fields
+        data_ptr_expr = f"({expression}).as_ptr()"
+        length_expr = f"({expression}).len()"
+    # Handle &[T] or &mut [T] slices
+    elif type_name.startswith("&[") or type_name.startswith("&mut ["):
+        # Slice reference - use as_ptr() and len()
+        data_ptr_expr = f"({expression}).as_ptr()"
+        length_expr = f"({expression}).len()"
+    # Handle Box<[T]>
+    elif "Box<[" in type_name:
+        data_ptr_expr = f"({expression}).as_ptr()"
+        length_expr = f"({expression}).len()"
+    # Handle fixed-size arrays [T; N]
+    elif type_name.startswith("[") and ";" in type_name:
+        # Fixed array - extract N from [T; N]
+        try:
+            # Parse the size from type like "[i32; 5]"
+            size_part = type_name.split(";")[1].strip().rstrip("]").strip()
+            detected_length = int(size_part)
+            data_ptr_expr = f"&({expression})[0]"
+        except (ValueError, IndexError):
+            data_ptr_expr = f"&({expression})[0]"
+    else:
+        # Try to treat it as a pointer/array directly
+        # This handles raw pointers and C-style arrays
+        data_ptr_expr = expression
+
+    # Get the length if we have a length expression
+    if length_expr and detected_length is None:
+        len_result = frame.EvaluateExpression(length_expr)
+        if len_result and not len_result.GetError().Fail():
+            try:
+                detected_length = int(len_result.GetValue() or "0")
+            except ValueError:
+                pass
+
+    # Determine count to use
+    actual_count = count
+    if actual_count is None:
+        if detected_length is not None:
+            actual_count = detected_length - start
+            if actual_count < 0:
+                actual_count = 0
+        else:
+            return {
+                "status": "error",
+                "error": f"Cannot determine slice length for '{expression}'. Please provide 'count' parameter.",
+            }
+
+    # If start is beyond the length, return empty
+    if detected_length is not None and start >= detected_length:
+        return {
+            "output": "",
+            "expression": expression,
+            "start": start,
+            "count": 0,
+            "detected_length": detected_length,
+            "detected_type": type_name,
+            "pagination": {
+                "total_chars": 0,
+                "offset": 0,
+                "limit": limit,
+                "has_more": False,
+            },
+        }
+
+    # Delegate to print_array
+    array_result = await print_array(
+        session_id=session_id,
+        expression=data_ptr_expr,
+        count=actual_count,
+        start=start if data_ptr_expr != expression else 0,  # Only apply start if we have data_ptr
+        element_type=None,
+        limit=limit,
+        offset=offset,
+    )
+
+    # Enhance the result with slice-specific info
+    if array_result.get("status") == "error":
+        return array_result
+
+    return {
+        "output": array_result.get("output", ""),
+        "expression": expression,
+        "start": start,
+        "count": actual_count,
+        "detected_length": detected_length,
+        "detected_type": type_name,
+        "data_ptr_expression": data_ptr_expr,
+        "pagination": array_result.get("pagination", {}),
+    }

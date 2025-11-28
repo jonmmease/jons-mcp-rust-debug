@@ -243,3 +243,90 @@ async def finish(session_id: str) -> dict[str, Any]:
             return_value = return_reg.GetValue()
 
     return {"output": "", "return_value": return_value}
+
+
+async def continue_to_line(
+    session_id: str,
+    file: str,
+    line: int,
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
+    """Continue execution until the specified line is hit.
+
+    Uses a one-shot breakpoint that auto-deletes after being hit.
+
+    Args:
+        session_id: The session identifier
+        file: Source file path (relative or absolute)
+        line: Target line number
+        timeout_ms: Optional timeout in milliseconds
+
+    Returns:
+        Dictionary with status, stop_reason, and current_location
+    """
+    client = ensure_debug_client()
+
+    try:
+        session = validate_session(client.sessions, session_id)
+        thread = get_active_thread(session.process)
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    # Resolve file path - try different formats like set_breakpoint does
+    bp = session.target.BreakpointCreateByLocation(file, line)
+    if not bp or not bp.IsValid() or bp.GetNumLocations() == 0:
+        # Try with just filename
+        filename = os.path.basename(file)
+        bp = session.target.BreakpointCreateByLocation(filename, line)
+
+    if not bp or not bp.IsValid():
+        return {"status": "error", "error": f"Failed to create breakpoint at {file}:{line}"}
+
+    # Set as one-shot breakpoint (auto-delete after hit)
+    bp.SetOneShot(True)
+    bp_id = bp.GetID()
+
+    # Continue execution
+    error = session.process.Continue()
+    if error.Fail():
+        # Clean up breakpoint on error
+        session.target.BreakpointDelete(bp_id)
+        return {"status": "error", "error": f"Continue failed: {error.GetCString()}"}
+
+    # Wait for stop using event-based synchronization
+    timeout = (timeout_ms / 1000) if timeout_ms else RUN_TIMEOUT
+    stop_event = client.wait_for_stop(session, timeout)
+
+    # Update stop info
+    client._update_stop_info(session)
+
+    # Check if we actually stopped at the target line
+    # If we timed out or stopped elsewhere, the breakpoint might still exist
+    if bp.IsValid() and bp.GetID() == bp_id:
+        # Breakpoint wasn't hit (would have been auto-deleted), clean it up
+        session.target.BreakpointDelete(bp_id)
+
+    # Get current location from frame
+    frame = thread.GetSelectedFrame()
+    location_info = get_frame_location(frame)
+
+    # Determine if we stopped at the target location
+    stopped_at_target = False
+    if location_info["file"] and location_info["line"]:
+        # Check if we stopped at the target line
+        stopped_file = os.path.basename(location_info["file"])
+        target_file = os.path.basename(file)
+        if stopped_file == target_file and location_info["line"] == line:
+            stopped_at_target = True
+
+    return {
+        "status": session.state.value,
+        "stop_reason": session.last_stop_reason,
+        "stopped_at": session.current_location or "",
+        "current_location": session.current_location,
+        "target_location": f"{file}:{line}",
+        "reached_target": stopped_at_target,
+        "file": location_info["file"],
+        "line": location_info["line"],
+        "function": location_info["function"],
+    }

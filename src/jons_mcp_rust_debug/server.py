@@ -81,6 +81,7 @@ def _register_tools() -> None:
     from .tools import (
         backtrace,
         check_debug_info,
+        continue_to_line,
         down,
         evaluate,
         finish,
@@ -91,13 +92,19 @@ def _register_tools() -> None:
         list_sessions,
         list_source,
         list_threads,
+        list_watchpoints,
         next,
+        print_array,
+        print_slice,
         print_variable,
         remove_breakpoint,
+        remove_watchpoint,
         run,
         select_thread,
         session_diagnostics,
         set_breakpoint,
+        set_variable,
+        set_watchpoint,
         start_debug,
         step,
         stop_debug,
@@ -114,22 +121,31 @@ def _register_tools() -> None:
     mcp.tool()(remove_breakpoint)
     mcp.tool()(list_breakpoints)
 
-    # Execution control (4 tools)
+    # Watchpoint management (3 tools)
+    mcp.tool()(set_watchpoint)
+    mcp.tool()(remove_watchpoint)
+    mcp.tool()(list_watchpoints)
+
+    # Execution control (5 tools)
     mcp.tool()(run)
     mcp.tool()(step)
     mcp.tool()(next)
     mcp.tool()(finish)
+    mcp.tool()(continue_to_line)
 
     # Stack navigation (3 tools)
     mcp.tool()(backtrace)
     mcp.tool()(up)
     mcp.tool()(down)
 
-    # Inspection (4 tools)
+    # Inspection (7 tools)
     mcp.tool()(list_source)
     mcp.tool()(print_variable)
+    mcp.tool()(print_array)
+    mcp.tool()(print_slice)
     mcp.tool()(list_locals)
     mcp.tool()(evaluate)
+    mcp.tool()(set_variable)
 
     # Thread management (2 tools)
     mcp.tool()(list_threads)

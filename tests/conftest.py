@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -10,6 +12,171 @@ import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+
+# =============================================================================
+# Prerequisite Detection Fixtures
+# =============================================================================
+
+
+def _check_lldb_available() -> bool:
+    """Check if LLDB is available on the system."""
+    return shutil.which("lldb") is not None
+
+
+def _check_cargo_available() -> bool:
+    """Check if cargo (Rust toolchain) is available on the system."""
+    return shutil.which("cargo") is not None
+
+
+# Cache the results to avoid repeated checks
+_LLDB_AVAILABLE = _check_lldb_available()
+_CARGO_AVAILABLE = _check_cargo_available()
+
+
+@pytest.fixture(scope="session")
+def lldb_available() -> bool:
+    """Check if LLDB is available for integration tests."""
+    return _LLDB_AVAILABLE
+
+
+@pytest.fixture(scope="session")
+def cargo_available() -> bool:
+    """Check if cargo is available for integration tests."""
+    return _CARGO_AVAILABLE
+
+
+@pytest.fixture(scope="session")
+def integration_prerequisites(lldb_available: bool, cargo_available: bool) -> bool:
+    """Check all prerequisites for integration tests."""
+    return lldb_available and cargo_available
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Configure pytest with custom markers."""
+    # Register the integration marker (already in pyproject.toml, but good to have here too)
+    config.addinivalue_line(
+        "markers", "integration: Integration tests with real LLDB process"
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip integration tests if prerequisites are not met."""
+    skip_lldb = pytest.mark.skip(reason="LLDB not available on this system")
+    skip_cargo = pytest.mark.skip(reason="Cargo/Rust toolchain not available")
+
+    for item in items:
+        if "integration" in item.keywords:
+            if not _LLDB_AVAILABLE:
+                item.add_marker(skip_lldb)
+            elif not _CARGO_AVAILABLE:
+                item.add_marker(skip_cargo)
+
+
+# =============================================================================
+# Integration Test Fixtures
+# =============================================================================
+
+# Get the path to test_samples directory
+_TEST_SAMPLES_DIR = Path(__file__).parent.parent / "test_samples"
+_BINARY_BUILT = False
+_BINARY_PATH: Path | None = None
+
+
+@pytest.fixture(scope="session")
+def test_samples_dir() -> Path:
+    """Get the path to the test_samples directory."""
+    return _TEST_SAMPLES_DIR
+
+
+@pytest.fixture(scope="session")
+def built_sample_binary(
+    integration_prerequisites: bool,
+) -> Generator[Path | None, None, None]:
+    """Build the test_samples binary and return the path to it.
+
+    This is a session-scoped fixture that builds once and caches the result.
+    Returns None if build fails or prerequisites are not met.
+    """
+    global _BINARY_BUILT, _BINARY_PATH
+
+    if not integration_prerequisites:
+        yield None
+        return
+
+    if _BINARY_BUILT:
+        yield _BINARY_PATH
+        return
+
+    # Build the sample program
+    result = subprocess.run(
+        ["cargo", "build"],
+        cwd=_TEST_SAMPLES_DIR,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print(f"Failed to build test_samples: {result.stderr}")
+        _BINARY_BUILT = True
+        _BINARY_PATH = None
+        yield None
+        return
+
+    # Find the built binary
+    binary_path = _TEST_SAMPLES_DIR / "target" / "debug" / "sample_program"
+    if not binary_path.exists():
+        print(f"Binary not found at {binary_path}")
+        _BINARY_BUILT = True
+        _BINARY_PATH = None
+        yield None
+        return
+
+    _BINARY_BUILT = True
+    _BINARY_PATH = binary_path
+    yield binary_path
+
+
+@pytest.fixture(scope="function")
+def debug_client_for_test_samples(
+    built_sample_binary: Path | None,
+) -> Generator[Any, None, None]:
+    """Create a debug client configured for test_samples.
+
+    This initializes the global debug_client for integration tests.
+    """
+    if built_sample_binary is None:
+        pytest.skip("test_samples binary not available")
+
+    from src.jons_mcp_rust_debug import server as server_module
+    from src.jons_mcp_rust_debug.lldb_client import RustDebugClient
+
+    # Create a real debug client
+    client = RustDebugClient()
+    # Override working directory to test_samples
+    client.config.working_directory = str(_TEST_SAMPLES_DIR)
+
+    # Set the global client
+    original_client = server_module.debug_client
+    server_module.debug_client = client
+
+    yield client
+
+    # Cleanup: stop all sessions and restore original client
+    for session_id in list(client.sessions.keys()):
+        try:
+            client._stop_session(session_id)
+        except Exception:
+            pass
+
+    server_module.debug_client = original_client
+
+
+# =============================================================================
+# Unit Test Fixtures (Mock-based)
+# =============================================================================
 
 
 @pytest.fixture(autouse=True)
@@ -131,6 +298,7 @@ def mock_session(
     session.process = mock_process
     session.state = DebuggerState.PAUSED
     session.breakpoints = {}
+    session.watchpoints = {}
     session.target_type = "binary"
     session.target_name = "test_binary"
     session.args = []
@@ -157,44 +325,3 @@ def mock_debug_client(mock_session: MagicMock) -> MagicMock:
     return client
 
 
-@pytest.fixture
-def temp_rust_project(tmp_path: Path) -> Path:
-    """Create a temporary Rust project for integration tests."""
-    # Create Cargo.toml
-    cargo_toml = tmp_path / "Cargo.toml"
-    cargo_toml.write_text(
-        """\
-[package]
-name = "test_project"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "test_project"
-path = "src/main.rs"
-"""
-    )
-
-    # Create src directory
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-
-    # Create main.rs with a simple debuggable program
-    main_rs = src_dir / "main.rs"
-    main_rs.write_text(
-        """\
-fn add(a: i32, b: i32) -> i32 {
-    let result = a + b;
-    result
-}
-
-fn main() {
-    let x = 5;
-    let y = 10;
-    let sum = add(x, y);
-    println!("Sum: {}", sum);
-}
-"""
-    )
-
-    return tmp_path

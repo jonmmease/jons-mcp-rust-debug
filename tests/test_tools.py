@@ -209,3 +209,199 @@ class TestDiagnosticTools:
         assert result["debugger_type"] == "lldb-api"
         assert "state" in result
         assert "breakpoints" in result
+
+
+class TestPrintArray:
+    """Tests for print_array tool."""
+
+    @pytest.mark.asyncio
+    async def test_print_array_session_not_found(
+        self, mock_debug_client: MagicMock
+    ) -> None:
+        """Test print_array with non-existent session."""
+        mock_debug_client.sessions = {}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.inspection import print_array
+
+            result = await print_array("nonexistent", "arr", 10)
+
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_print_array_not_paused(
+        self, mock_debug_client: MagicMock, mock_session: MagicMock
+    ) -> None:
+        """Test print_array when not paused."""
+        mock_session.state = DebuggerState.RUNNING
+        mock_debug_client.sessions = {"test_session_1": mock_session}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.inspection import print_array
+
+            result = await print_array("test_session_1", "arr", 10)
+
+        assert result["status"] == "error"
+        assert "not paused" in result["error"].lower()
+
+
+class TestPrintSlice:
+    """Tests for print_slice tool."""
+
+    @pytest.mark.asyncio
+    async def test_print_slice_session_not_found(
+        self, mock_debug_client: MagicMock
+    ) -> None:
+        """Test print_slice with non-existent session."""
+        mock_debug_client.sessions = {}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.inspection import print_slice
+
+            result = await print_slice("nonexistent", "my_slice")
+
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_print_slice_not_paused(
+        self, mock_debug_client: MagicMock, mock_session: MagicMock
+    ) -> None:
+        """Test print_slice when not paused."""
+        mock_session.state = DebuggerState.RUNNING
+        mock_debug_client.sessions = {"test_session_1": mock_session}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.inspection import print_slice
+
+            result = await print_slice("test_session_1", "my_slice")
+
+        assert result["status"] == "error"
+        assert "not paused" in result["error"].lower()
+
+
+class TestWatchpoints:
+    """Tests for watchpoint tools."""
+
+    @pytest.mark.asyncio
+    async def test_set_watchpoint_session_not_found(
+        self, mock_debug_client: MagicMock
+    ) -> None:
+        """Test set_watchpoint with non-existent session."""
+        mock_debug_client.sessions = {}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.watchpoints.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.watchpoints import set_watchpoint
+
+            result = await set_watchpoint("nonexistent", "x")
+
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_list_watchpoints_session_not_found(
+        self, mock_debug_client: MagicMock
+    ) -> None:
+        """Test list_watchpoints with non-existent session."""
+        mock_debug_client.sessions = {}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.watchpoints.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.watchpoints import list_watchpoints
+
+            result = await list_watchpoints("nonexistent")
+
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_remove_watchpoint_session_not_found(
+        self, mock_debug_client: MagicMock
+    ) -> None:
+        """Test remove_watchpoint with non-existent session."""
+        mock_debug_client.sessions = {}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.watchpoints.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.watchpoints import remove_watchpoint
+
+            result = await remove_watchpoint("nonexistent", 1)
+
+        assert result["status"] == "error"
+
+
+class TestSetVariable:
+    """Tests for set_variable tool."""
+
+    @pytest.mark.asyncio
+    async def test_set_variable_session_not_found(
+        self, mock_debug_client: MagicMock
+    ) -> None:
+        """Test set_variable with non-existent session."""
+        mock_debug_client.sessions = {}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.inspection import set_variable
+
+            result = await set_variable("nonexistent", "x", "42")
+
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_set_variable_not_paused(
+        self, mock_debug_client: MagicMock, mock_session: MagicMock
+    ) -> None:
+        """Test set_variable when not paused."""
+        mock_session.state = DebuggerState.RUNNING
+        mock_debug_client.sessions = {"test_session_1": mock_session}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.inspection import set_variable
+
+            result = await set_variable("test_session_1", "x", "42")
+
+        assert result["status"] == "error"
+        assert "not paused" in result["error"].lower()
+
+
+class TestContinueToLine:
+    """Tests for continue_to_line tool."""
+
+    @pytest.mark.asyncio
+    async def test_continue_to_line_session_not_found(
+        self, mock_debug_client: MagicMock
+    ) -> None:
+        """Test continue_to_line with non-existent session."""
+        mock_debug_client.sessions = {}
+
+        with patch(
+            "src.jons_mcp_rust_debug.tools.execution.ensure_debug_client",
+            return_value=mock_debug_client,
+        ):
+            from src.jons_mcp_rust_debug.tools.execution import continue_to_line
+
+            result = await continue_to_line("nonexistent", "main.rs", 42)
+
+        assert result["status"] == "error"

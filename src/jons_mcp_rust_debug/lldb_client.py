@@ -66,6 +66,21 @@ class Breakpoint:
 
 
 @dataclass
+class Watchpoint:
+    """Represents a watchpoint."""
+
+    id: int
+    address: int
+    size: int
+    watch_type: str  # "write", "read", or "read_write"
+    expression: str | None = None
+    condition: str | None = None
+    enabled: bool = True
+    hit_count: int = 0
+    lldb_watchpoint: lldb.SBWatchpoint | None = None
+
+
+@dataclass
 class DebugSession:
     """Represents a debugging session using LLDB Python API."""
 
@@ -77,6 +92,7 @@ class DebugSession:
     event_thread: threading.Thread | None = None
     state: DebuggerState = DebuggerState.IDLE
     breakpoints: dict[int, Breakpoint] = field(default_factory=dict)
+    watchpoints: dict[int, Watchpoint] = field(default_factory=dict)
     target_type: str = "binary"  # "binary", "test", "example"
     target_name: str = ""
     args: list[str] = field(default_factory=list)
@@ -86,6 +102,7 @@ class DebugSession:
     created_time: float = field(default_factory=time.time)
     # Thread synchronization
     state_changed: threading.Event = field(default_factory=threading.Event)
+    stop_requested: threading.Event = field(default_factory=threading.Event)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -107,11 +124,20 @@ class RustDebugClient:
         config_path = Path("rustdebugconfig.json")
         if config_path.exists():
             try:
+                # Resolve to absolute path to get the config file's directory
+                config_path = config_path.resolve()
+                config_dir = str(config_path.parent)
+
                 with open(config_path) as f:
                     data = json.load(f)
                 # Remove debugger field as we're using LLDB API
                 data.pop("debugger", None)
                 data.pop("prefer_rust_wrappers", None)
+
+                # Default working_directory to config file's directory
+                if "working_directory" not in data:
+                    data["working_directory"] = config_dir
+
                 return Config(**data)
             except Exception as e:
                 logger.warning(f"Failed to load config: {e}")
@@ -149,14 +175,39 @@ class RustDebugClient:
         env: dict[str, str] | None = None,
         package: str | None = None,
     ) -> str:
-        """Build the target and return the path to the binary."""
+        """Build the target and return the path to the binary.
+
+        For tests:
+        - If target contains "::" (e.g., "module::tests::test_name"), it's a lib test
+        - If target is a simple name, check if it's a test file in tests/ dir
+        - If no target, build lib tests (--lib)
+        """
         cargo = self._find_cargo_executable()
+        cargo_flags = cargo_flags or []
 
         # Build command based on target type
         if target_type == "test":
             cmd = [cargo, "test", "--no-run"]
-            if target:
-                cmd.extend(["--test", target])
+            # Check if target looks like a test function path (contains ::)
+            # or if it's a test file name
+            if target and "::" not in target:
+                # Could be an integration test file, try --test
+                test_file = (
+                    Path(self.config.working_directory) / "tests" / f"{target}.rs"
+                )
+                if test_file.exists():
+                    cmd.extend(["--test", target])
+                else:
+                    # Not a test file, assume lib tests
+                    if "--lib" not in cargo_flags:
+                        cmd.append("--lib")
+            elif not target:
+                # No target specified, build lib tests
+                if "--lib" not in cargo_flags:
+                    cmd.append("--lib")
+            # If target contains ::, it's a function path - just build lib tests
+            elif "::" in target and "--lib" not in cargo_flags:
+                cmd.append("--lib")
         elif target_type == "example":
             cmd = [cargo, "build", "--example", target]
         else:  # binary
@@ -172,8 +223,7 @@ class RustDebugClient:
         cmd.extend(self.config.cargo_args)
 
         # Add any runtime cargo flags
-        if cargo_flags:
-            cmd.extend(cargo_flags)
+        cmd.extend(cargo_flags)
 
         # Merge environment variables
         build_env = {**os.environ, **self.config.environment}
@@ -194,32 +244,50 @@ class RustDebugClient:
             raise BuildError(result.stderr)
 
         # Parse cargo output to find the binary path
-        binary_pattern = re.compile(r"Executable.+\((.+)\)")
+        # Look for "Executable unittests src/lib.rs (path)" or similar
+        binary_pattern = re.compile(r"Executable[^\(]+\(([^\)]+)\)")
         for line in result.stderr.split("\n"):
             match = binary_pattern.search(line)
             if match:
-                return match.group(1)
+                binary_path = match.group(1)
+                # Convert to absolute path if relative
+                if not Path(binary_path).is_absolute():
+                    binary_path = str(
+                        Path(self.config.working_directory) / binary_path
+                    )
+                return binary_path
 
         # Fallback: guess the binary location
-        build_mode = (
-            "release" if cargo_flags and "--release" in cargo_flags else "debug"
-        )
+        build_mode = "release" if "--release" in cargo_flags else "debug"
         target_dir = Path(self.config.working_directory) / "target" / build_mode
 
         if target_type == "test":
             deps_dir = target_dir / "deps"
             if deps_dir.exists():
-                test_bins = (
-                    list(deps_dir.glob(f"{target}-*"))
-                    if target
-                    else list(deps_dir.glob("*"))
-                )
+                # For lib tests, binary is named after package (with underscores)
+                # e.g., avenger-geometry -> avenger_geometry-{hash}
+                search_name = None
+                if package:
+                    search_name = package.replace("-", "_")
+                elif target and "::" not in target:
+                    search_name = target.replace("-", "_")
+
+                if search_name:
+                    test_bins = list(deps_dir.glob(f"{search_name}-*"))
+                else:
+                    test_bins = list(deps_dir.glob("*"))
+
+                # Filter to executable files only
                 test_bins = [
                     b
                     for b in test_bins
-                    if b.is_file() and not b.suffix and not b.name.endswith(".dSYM")
+                    if b.is_file()
+                    and not b.suffix
+                    and not b.name.endswith(".dSYM")
+                    and not b.name.endswith(".d")
                 ]
                 if test_bins:
+                    # Return most recently modified
                     return str(max(test_bins, key=lambda p: p.stat().st_mtime))
         elif target_type == "example":
             example_bin = target_dir / "examples" / target
@@ -255,11 +323,19 @@ class RustDebugClient:
     def _event_handler_thread(self, session: DebugSession) -> None:
         """Thread to handle LLDB events."""
         try:
-            while session.process and session.process.IsValid():
+            while not session.stop_requested.is_set():
+                # Check process validity
+                if not session.process or not session.process.IsValid():
+                    break
+
                 event = lldb.SBEvent()
                 if session.listener and session.listener.WaitForEvent(
                     EVENT_POLL_TIMEOUT, event
                 ):
+                    # Check stop flag again after wait
+                    if session.stop_requested.is_set():
+                        break
+
                     if lldb.SBProcess.EventIsProcessEvent(event):
                         state = lldb.SBProcess.GetStateFromEvent(event)
 
@@ -275,6 +351,7 @@ class RustDebugClient:
                             elif state == lldb.eStateExited:
                                 session.state = DebuggerState.FINISHED
                                 session.state_changed.set()
+                                break  # Process exited, stop the thread
                             elif state == lldb.eStateCrashed:
                                 session.state = DebuggerState.ERROR
                                 session.state_changed.set()
@@ -409,11 +486,19 @@ class RustDebugClient:
             return
 
         try:
-            # Stop the process
+            # Signal event handler thread to stop
+            session.stop_requested.set()
+            session.state_changed.set()  # Wake up any waiting code
+
+            # Stop the process first
             if session.process and session.process.IsValid():
                 session.process.Kill()
 
-            # Destroy the debugger
+            # Wait for event handler thread to finish (with timeout)
+            if session.event_thread and session.event_thread.is_alive():
+                session.event_thread.join(timeout=EVENT_POLL_TIMEOUT + 0.5)
+
+            # Now safe to destroy the debugger
             if session.debugger:
                 lldb.SBDebugger.Destroy(session.debugger)
         except Exception as e:

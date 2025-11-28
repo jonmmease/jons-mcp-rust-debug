@@ -55,9 +55,12 @@ The server uses the `lldb-python` package to provide direct access to LLDB's deb
 - **Cargo Integration**: Automatically builds targets before debugging
 - **Session Management**: Create and manage multiple debugging sessions concurrently
 - **Breakpoint Control**: Set, remove, and list breakpoints with conditions
-- **Execution Control**: Run, step, next, finish commands with clear action feedback
+- **Watchpoint Support**: Monitor memory locations and variables for changes with read/write watchpoints
+- **Execution Control**: Run, step, next, finish, and continue-to-line commands with clear action feedback
 - **Stack Navigation**: Navigate up and down the call stack, view backtraces
 - **Variable Inspection**: Examine variables with direct API access, evaluate expressions, list locals
+- **Variable Modification**: Set variables to new values during debugging sessions
+- **Array Inspection**: Print array and slice contents with automatic type detection
 - **Source Code Display**: View source code around current execution point
 - **Rust Panic Handling**: Automatically sets breakpoints on rust_panic
 - **Test Debugging**: Special support for debugging Rust tests with test summary
@@ -117,6 +120,8 @@ Supported tools:
 - `run` - Program output can be extensive
 - `list_source` - Source files can be large
 - `print_variable` - Complex data structures may have long representations
+- `print_array` - Array contents can be very large
+- `print_slice` - Slice contents can be very large
 - `list_locals` - Many local variables can produce long output
 - `check_debug_info` - Debug information can be very detailed
 
@@ -136,14 +141,17 @@ Create a `rustdebugconfig.json` file in your project root:
 
 ```json
 {
-  "cargo_path": null,            // Path to cargo executable (null = auto-detect)
-  "working_directory": ".",      // Working directory for debugging
-  "environment": {               // Additional environment variables
+  "environment": {
     "RUST_BACKTRACE": "1"
-  },
-  "cargo_args": ["--release"]    // Additional cargo build arguments
+  }
 }
 ```
+
+All fields are optional:
+- `cargo_path`: Path to cargo executable (default: auto-detect)
+- `working_directory`: Working directory for debugging (default: directory containing the config file)
+- `environment`: Additional environment variables
+- `cargo_args`: Additional cargo build arguments (e.g., `["--release"]`)
 
 ## MCP Tools
 
@@ -221,6 +229,53 @@ Returns:
   breakpoints: Array of breakpoint objects
 ```
 
+### Watchpoint Management
+
+#### set_watchpoint
+Set a watchpoint on a variable or memory address to pause execution when the value changes.
+```
+Args:
+  session_id: The session identifier
+  expression: Variable name or memory address to watch
+  watch_type: Type of watchpoint - "write", "read", or "read_write" (default: "write")
+  size: Size in bytes to watch (optional, auto-detected from expression)
+  condition: Conditional expression for the watchpoint (optional)
+Returns:
+  watchpoint_id: Unique watchpoint identifier
+  address: Memory address being watched (hex format)
+  size: Size in bytes being monitored
+  watch_type: Type of watchpoint set
+  expression: Expression being watched
+  status: "set" or error message
+```
+
+#### list_watchpoints
+List all watchpoints in the session.
+```
+Args:
+  session_id: The session identifier
+Returns:
+  watchpoints: Array of watchpoint objects with details:
+    - id: Watchpoint identifier
+    - address: Memory address (hex format)
+    - size: Size in bytes
+    - watch_type: "write", "read", or "read_write"
+    - expression: Original expression
+    - condition: Conditional expression (if set)
+    - enabled: Whether watchpoint is active
+    - hit_count: Number of times triggered
+```
+
+#### remove_watchpoint
+Remove a watchpoint.
+```
+Args:
+  session_id: The session identifier
+  watchpoint_id: Watchpoint identifier
+Returns:
+  status: "removed" or error message
+```
+
 ### Execution Control
 
 #### run
@@ -266,6 +321,26 @@ Args:
 Returns:
   output: Debugger output
   return_value: Value being returned (if available)
+```
+
+#### continue_to_line
+Continue execution until the specified line is hit.
+```
+Args:
+  session_id: The session identifier
+  file: Source file path (relative or absolute)
+  line: Target line number
+  timeout_ms: Optional timeout in milliseconds
+Returns:
+  status: Current execution state
+  stop_reason: Why execution stopped
+  stopped_at: Location where execution stopped
+  current_location: Current file:line position
+  target_location: The requested file:line
+  reached_target: Boolean indicating if the target was reached
+  file: File path where stopped
+  line: Line number where stopped
+  function: Function name where stopped
 ```
 
 ### Stack Navigation
@@ -336,6 +411,23 @@ Returns:
   pagination: Pagination info for value and type
 ```
 
+#### set_variable
+Set a variable to a new value during debugging.
+```
+Args:
+  session_id: The session identifier
+  variable: Variable name or path (e.g., "x", "config.timeout")
+  value: New value as string (e.g., "42", "true", "3.14")
+  frame_index: Stack frame index (default: 0 = current frame)
+Returns:
+  status: "success" or "error"
+  variable: Variable name
+  old_value: Previous value
+  new_value: New value after assignment
+  type: Variable type
+  error: Error message if modification failed
+```
+
 #### list_locals
 List all local variables in current scope.
 ```
@@ -355,6 +447,47 @@ Returns:
   result: Evaluation result
   error: Error message if evaluation failed
   expression: The evaluated expression
+```
+
+#### print_array
+Print elements of an array or pointer range using LLDB's parray command.
+```
+Args:
+  session_id: The session identifier
+  expression: Array/pointer expression to index (e.g., "arr", "ptr", "&vec[0]")
+  count: Number of elements to print
+  start: Starting index (default: 0)
+  element_type: Optional type for pointer casting (e.g., "i32")
+  limit: Max characters to return (optional, for pagination)
+  offset: Starting character position (optional, for pagination)
+Returns:
+  output: Formatted array elements
+  expression: The evaluated expression
+  start: Starting index used
+  count: Number of elements printed
+  element_type: Type used (if specified)
+  pagination: Pagination info (if limit specified)
+```
+
+#### print_slice
+Print elements of a Rust slice, Vec, or Box<[T]>.
+```
+Args:
+  session_id: The session identifier
+  expression: Slice expression (e.g., "my_slice", "&vec[..]", "numbers")
+  start: Starting index (default: 0)
+  count: Number of elements to print (None = use slice's length)
+  limit: Max characters to return (optional, for pagination)
+  offset: Starting character position (optional, for pagination)
+Returns:
+  output: Formatted slice elements
+  expression: The evaluated expression
+  start: Starting index used
+  count: Number of elements printed
+  detected_length: Total length of the slice
+  detected_type: Rust type of the slice
+  data_ptr_expression: Internal pointer expression used
+  pagination: Pagination info (if limit specified)
 ```
 
 #### get_test_summary
