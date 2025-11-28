@@ -102,6 +102,9 @@ async def list_source(
     }
 
 
+DEFAULT_DEPTH = 2  # Show immediate children but not grandchildren
+
+
 async def print_variable(
     session_id: str,
     expression: str,
@@ -116,7 +119,8 @@ async def print_variable(
         expression: Variable name or expression to evaluate
         limit: Character limit for pagination
         offset: Character offset for pagination
-        depth: Display depth for nested structures
+        depth: Max nesting depth (default 2). Use higher values for deeply
+            nested structures. Use 1 for just top-level fields.
 
     Returns:
         Dictionary with value and type
@@ -145,26 +149,44 @@ async def print_variable(
     if not frame or not frame.IsValid():
         return {"status": "error", "error": "No active frame"}
 
-    # Evaluate expression
-    options = lldb.SBExpressionOptions()
-    if depth:
-        # This would need custom formatting
-        pass
+    # Use depth limiting via frame variable command
+    actual_depth = depth if depth is not None else DEFAULT_DEPTH
 
-    result = frame.EvaluateExpression(expression, options)
+    # Try frame variable first (better depth control for local variables)
+    ret = lldb.SBCommandReturnObject()
+    cmd = f"frame variable --depth {actual_depth} {expression}"
+    session.debugger.GetCommandInterpreter().HandleCommand(cmd, ret)
 
-    if not result or result.GetError().Fail():
-        error_msg = result.GetError().GetCString() if result else "Unknown error"
-        return {
-            "value": "",
-            "type": "",
-            "expression": expression,
-            "error": error_msg,
-        }
+    if ret.Succeeded():
+        value = ret.GetOutput().strip()
+        # Extract type from the output (format: "type name = value")
+        type_name = "unknown"
+        if " = " in value:
+            # Try to parse type from first line
+            first_line = value.split("\n")[0]
+            if " = " in first_line:
+                type_part = first_line.split(" = ")[0].strip()
+                # Remove the variable name to get type
+                if " " in type_part:
+                    type_name = type_part.rsplit(" ", 1)[0]
+    else:
+        # Fall back to expression evaluation for complex expressions
+        result = frame.EvaluateExpression(expression)
 
-    # Get value and type
-    value = result.GetValue() or str(result)
-    type_name = result.GetTypeName() or "unknown"
+        if not result or result.GetError().Fail():
+            error_msg = result.GetError().GetCString() if result else "Unknown error"
+            return {
+                "value": "",
+                "type": "",
+                "expression": expression,
+                "error": error_msg,
+            }
+
+        # Get value with depth limiting using SBValue's description
+        stream = lldb.SBStream()
+        result.GetDescription(stream)
+        value = stream.GetData() or result.GetValue() or str(result)
+        type_name = result.GetTypeName() or "unknown"
 
     # Handle pagination
     value_pagination = paginate_text(value, limit, offset)
@@ -174,6 +196,7 @@ async def print_variable(
         "value": value_pagination["content"],
         "type": type_pagination["content"],
         "expression": expression,
+        "depth": actual_depth,
         "pagination": {
             "value": {
                 "total_chars": value_pagination["total_chars"],

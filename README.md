@@ -404,17 +404,21 @@ Returns:
 
 #### print_variable
 Print the value of a variable or expression.
+
+For complex types (Result, DataFrame, etc.), use `depth` to limit output.
 ```
 Args:
   session_id: The session identifier
   expression: Variable name or expression
   limit: Max characters to return (optional, for pagination)
   offset: Starting character position (optional, for pagination)
-  depth: Maximum depth for nested structures (optional)
+  depth: Max nesting depth (default: 2). Use 1 for top-level only,
+         higher values for deeply nested structures.
 Returns:
   value: String representation
   type: Type information
   expression: The evaluated expression
+  depth: The depth used
   pagination: Pagination info for value and type
 ```
 
