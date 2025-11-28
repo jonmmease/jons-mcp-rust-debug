@@ -14,7 +14,7 @@ async def start_debug(
     cargo_flags: list[str] | None = None,
     env: dict[str, str] | None = None,
     package: str | None = None,
-    working_directory: str | None = None,
+    root_directory: str | None = None,
 ) -> dict[str, Any]:
     """Start a new Rust debugging session using LLDB Python API.
 
@@ -35,11 +35,13 @@ async def start_debug(
             - Test in mod tests {}: ["tests::test_name", "--exact"]
         cargo_flags: Additional cargo build flags (e.g., ["--release"])
         env: Environment variables for the build process
-        package: Package name for workspace projects (e.g., "my-crate")
-        working_directory: Absolute path to the Rust project directory:
-            - Single crate: The project root (where Cargo.toml is)
-            - Workspace: The individual crate directory, NOT the workspace root.
-              Using workspace root may cause breakpoint resolution issues.
+        package: Package name for workspace projects (e.g., "my-crate").
+            When specified, the crate directory is automatically resolved
+            from the workspace using cargo metadata.
+        root_directory: Absolute path to the Rust project root:
+            - Single crate: The project directory (where Cargo.toml is)
+            - Workspace: The workspace root directory. Use with `package`
+              to specify which crate to debug.
 
     Returns:
         Dictionary with session_id and status
@@ -49,37 +51,41 @@ async def start_debug(
         - The debugger automatically handles breakpoints on spawned threads
 
     Examples:
-        # Single crate - debug a binary
+        # Single crate project
         start_debug(target_type="binary", target="my_app",
-                    working_directory="/path/to/my-project")
+                    root_directory="/path/to/my-project")
 
         # Single crate - debug an integration test
         start_debug(target_type="test", target="my_test",
                     args=["test_name", "--exact"],
-                    working_directory="/path/to/my-project")
+                    root_directory="/path/to/my-project")
 
-        # Workspace - debug integration test (use crate dir, not workspace root!)
+        # Workspace - specify package, tool resolves crate directory
         start_debug(target_type="test", target="my_test",
-                    args=["tests::test_name", "--exact"],
-                    working_directory="/path/to/workspace/my-crate")
-
-        # Workspace - debug lib test with package specified
-        start_debug(target_type="test",
-                    target="utils::tests::test_parsing",
                     package="my-crate",
-                    args=["utils::tests::test_parsing", "--exact"],
-                    working_directory="/path/to/workspace/my-crate")
+                    args=["tests::test_name", "--exact"],
+                    root_directory="/path/to/workspace")
+
+        # Workspace - debug a binary in a specific package
+        start_debug(target_type="binary", target="my_app",
+                    package="my-crate",
+                    root_directory="/path/to/workspace")
     """
     try:
         client = ensure_debug_client()
 
-        # Override working directory if provided
+        # Set the root directory first (needed for package resolution)
         original_working_dir = None
-        if working_directory:
+        if root_directory:
             original_working_dir = client.config.working_directory
-            client.config.working_directory = working_directory
+            client.config.working_directory = root_directory
 
         try:
+            # If package is specified, resolve its directory from workspace
+            if package:
+                package_dir = client.resolve_package_directory(package)
+                client.config.working_directory = package_dir
+
             session_id = client.create_session(
                 target_type=target_type,
                 target=target or "",

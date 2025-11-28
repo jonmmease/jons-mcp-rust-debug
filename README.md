@@ -164,16 +164,23 @@ Args:
   target_type: "binary", "test", or "example" (required)
   target: Name of the specific target (optional for single binary)
   args: Command line arguments (optional)
+    For tests: the test filter, e.g., ["test_name", "--exact"]
+    IMPORTANT: Use full module path for tests in a module: ["tests::test_name", "--exact"]
+    Run `cargo test --test <file> -- --list` to find the correct filter
   cargo_flags: Additional cargo build flags (optional)
     Example: ["--no-default-features", "--features", "test-only"]
   env: Environment variables for the build process (optional)
     Example: {"RUST_TEST_THREADS": "1", "CARGO_BUILD_TARGET": "x86_64-unknown-linux-gnu"}
-  package: Specific package name for workspace projects (optional)
-    Example: "my-crate" to build only that crate in a workspace
+  package: Package name for workspace projects (optional)
+    When specified, the crate directory is automatically resolved from cargo metadata
+    Example: "my-crate"
+  root_directory: Absolute path to the Rust project root (optional)
+    - Single crate: The project directory (where Cargo.toml is)
+    - Workspace: The workspace root. Use with `package` to specify which crate
 Returns:
   session_id: Unique session identifier
   status: "started" or error message
-  debugger: The debugger being used (gdb/lldb/rust-gdb/rust-lldb)
+  debugger: The debugger being used (lldb-api)
 ```
 
 #### stop_debug
@@ -570,7 +577,11 @@ Returns:
 ### Basic Binary Debugging
 ```python
 # Start debugging a simple binary
-await start_debug("binary", "myapp")
+await start_debug(
+    target_type="binary",
+    target="myapp",
+    root_directory="/path/to/my-project"
+)
 ```
 
 ### Debugging with Custom Features
@@ -580,19 +591,22 @@ await start_debug(
     target_type="test",
     target="integration_test",
     cargo_flags=["--no-default-features", "--features", "test-only"],
-    env={"RUST_TEST_THREADS": "1"}
+    env={"RUST_TEST_THREADS": "1"},
+    root_directory="/path/to/my-project"
 )
 ```
 
 ### Workspace-Specific Debugging
 ```python
 # Debug a specific crate in a workspace
+# The tool automatically resolves the crate directory from cargo metadata
 await start_debug(
     target_type="binary",
     target="server",
     package="backend-crate",
     cargo_flags=["--release"],
-    env={"RUST_LOG": "debug"}
+    env={"RUST_LOG": "debug"},
+    root_directory="/path/to/workspace"
 )
 ```
 
@@ -602,7 +616,8 @@ await start_debug(
 await start_debug(
     target_type="binary",
     target="myapp",
-    env={"CARGO_BUILD_TARGET": "x86_64-unknown-linux-musl"}
+    env={"CARGO_BUILD_TARGET": "x86_64-unknown-linux-musl"},
+    root_directory="/path/to/my-project"
 )
 ```
 
@@ -610,30 +625,22 @@ await start_debug(
 
 This section covers common patterns and gotchas when debugging Rust tests.
 
-### Working Directory for Workspaces
+### Single Crate vs Workspace
 
-For workspace projects, `working_directory` should be the **crate directory** (where the crate's Cargo.toml is), not the workspace root.
-
-```
-my-workspace/
-├── Cargo.toml          # workspace root
-├── crate-a/
-│   ├── Cargo.toml      # ← use this directory
-│   └── tests/
-│       └── my_test.rs
-```
-
+For **single crate** projects, just specify `root_directory`:
 ```python
-# Correct - point to crate directory
-start_debug(
-    target_type="test",
-    target="my_test",
-    working_directory="/path/to/my-workspace/crate-a"
-)
-
-# Wrong - workspace root may cause breakpoint resolution issues
-working_directory="/path/to/my-workspace"
+start_debug(target_type="test", target="my_test",
+            root_directory="/path/to/my-project")
 ```
+
+For **workspace** projects, specify both `root_directory` (workspace root) and `package`:
+```python
+start_debug(target_type="test", target="my_test",
+            package="my-crate",
+            root_directory="/path/to/workspace")
+```
+
+The tool automatically resolves the crate's directory using `cargo metadata`.
 
 ### Test Target Naming
 
@@ -703,21 +710,14 @@ No special configuration needed.
 
 ### Complete Example: Debugging an Integration Test
 
-```
-my-crate/
-├── Cargo.toml
-├── src/
-└── tests/
-    └── integration.rs   # contains: mod tests { #[tokio::test] async fn test_foo() }
-```
-
+**Single crate:**
 ```python
-# 1. Start session (working_directory = crate dir)
+# 1. Start session
 result = await start_debug(
     target_type="test",
     target="integration",
     args=["tests::test_foo", "--exact"],
-    working_directory="/path/to/my-crate"
+    root_directory="/path/to/my-crate"
 )
 session_id = result["session_id"]
 
@@ -726,6 +726,18 @@ await set_breakpoint(session_id, file="integration.rs", line=25)
 
 # 3. Run to breakpoint
 await run(session_id)  # → stops at breakpoint
+```
+
+**Workspace:**
+```python
+# Specify package - tool automatically resolves crate directory
+result = await start_debug(
+    target_type="test",
+    target="integration",
+    package="my-crate",
+    args=["tests::test_foo", "--exact"],
+    root_directory="/path/to/workspace"
+)
 ```
 
 ## Technical Implementation

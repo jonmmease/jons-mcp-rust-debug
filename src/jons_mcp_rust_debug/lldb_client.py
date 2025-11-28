@@ -167,6 +167,46 @@ class RustDebugClient:
 
         return cargo
 
+    def resolve_package_directory(self, package: str) -> str:
+        """Resolve a package name to its directory using cargo metadata.
+
+        Args:
+            package: The package name (e.g., "my-crate")
+
+        Returns:
+            Absolute path to the package directory
+
+        Raises:
+            RuntimeError: If package is not found in workspace
+        """
+        cargo = self._find_cargo_executable()
+
+        try:
+            result = subprocess.run(
+                [cargo, "metadata", "--format-version=1", "--no-deps"],
+                cwd=self.config.working_directory,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            metadata = json.loads(result.stdout)
+
+            for pkg in metadata.get("packages", []):
+                if pkg.get("name") == package:
+                    manifest_path = pkg.get("manifest_path")
+                    if manifest_path:
+                        # manifest_path is the path to Cargo.toml, get the directory
+                        return str(Path(manifest_path).parent)
+
+            raise RuntimeError(
+                f"Package '{package}' not found in workspace. "
+                f"Available packages: {[p.get('name') for p in metadata.get('packages', [])]}"
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to run cargo metadata: {e.stderr}") from e
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse cargo metadata output: {e}") from e
+
     def _build_target(
         self,
         target_type: str,
