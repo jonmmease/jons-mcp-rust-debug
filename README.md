@@ -606,6 +606,128 @@ await start_debug(
 )
 ```
 
+## Debugging Tests Guide
+
+This section covers common patterns and gotchas when debugging Rust tests.
+
+### Working Directory for Workspaces
+
+For workspace projects, `working_directory` should be the **crate directory** (where the crate's Cargo.toml is), not the workspace root.
+
+```
+my-workspace/
+├── Cargo.toml          # workspace root
+├── crate-a/
+│   ├── Cargo.toml      # ← use this directory
+│   └── tests/
+│       └── my_test.rs
+```
+
+```python
+# Correct - point to crate directory
+start_debug(
+    target_type="test",
+    target="my_test",
+    working_directory="/path/to/my-workspace/crate-a"
+)
+
+# Wrong - workspace root may cause breakpoint resolution issues
+working_directory="/path/to/my-workspace"
+```
+
+### Test Target Naming
+
+**Integration tests** (in `tests/` directory):
+- `target`: the test file name without `.rs` extension
+- `args`: depends on whether test is inside a module
+
+```rust
+// tests/test_data.rs
+
+// Test directly in file:
+#[test]
+fn my_test() { }
+// → args: ["my_test", "--exact"]
+
+// Test inside mod tests {}:
+mod tests {
+    #[test]
+    fn my_test() { }
+}
+// → args: ["tests::my_test", "--exact"]
+```
+
+**Lib tests** (in `src/` with `#[cfg(test)]`):
+- Use the full module path in both `target` and `args`
+
+```python
+start_debug(
+    target_type="test",
+    target="my_module::tests::test_name",
+    args=["my_module::tests::test_name", "--exact"]
+)
+```
+
+**To find the correct filter**, run:
+```bash
+cargo test --test <test_file> -- --list
+```
+
+### Breakpoint File Paths
+
+Use the **filename only** for breakpoints, not the full path:
+
+```python
+# Recommended - filename only
+set_breakpoint(session_id, file="test_data.rs", line=117)
+
+# Also works
+set_breakpoint(session_id, file="tests/test_data.rs", line=117)
+
+# May cause issues - avoid absolute paths
+set_breakpoint(session_id, file="/full/absolute/path/to/test_data.rs", line=117)
+```
+
+### Async Test Support
+
+Async tests using `#[tokio::test]`, `#[async_std::test]`, etc. are fully supported. The debugger automatically handles breakpoints on spawned threads.
+
+```rust
+#[tokio::test]
+async fn test_async_operation() {
+    let result = some_async_fn().await;  // ← breakpoint here works
+}
+```
+
+No special configuration needed.
+
+### Complete Example: Debugging an Integration Test
+
+```
+my-crate/
+├── Cargo.toml
+├── src/
+└── tests/
+    └── integration.rs   # contains: mod tests { #[tokio::test] async fn test_foo() }
+```
+
+```python
+# 1. Start session (working_directory = crate dir)
+result = await start_debug(
+    target_type="test",
+    target="integration",
+    args=["tests::test_foo", "--exact"],
+    working_directory="/path/to/my-crate"
+)
+session_id = result["session_id"]
+
+# 2. Set breakpoint (filename only)
+await set_breakpoint(session_id, file="integration.rs", line=25)
+
+# 3. Run to breakpoint
+await run(session_id)  # → stops at breakpoint
+```
+
 ## Technical Implementation
 
 ### LLDB Python API Benefits
