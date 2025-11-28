@@ -479,8 +479,10 @@ Returns:
 #### print_slice
 Print elements of a Rust slice, Vec, or Box<[T]>.
 
-Use print_slice for Rust types (Vec, &[T], Box<[T]>, arrays).
-Use print_array for raw pointers or pointer expressions.
+Works with standard Rust types: Vec<T>, &[T], &mut [T], Box<[T]>, [T; N].
+
+For custom structs with pointer+length fields (e.g., `path.points` where you
+see `data_pointer` and `length` fields), use print_array with the data pointer.
 ```
 Args:
   session_id: The session identifier

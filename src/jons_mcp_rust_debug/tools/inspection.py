@@ -482,12 +482,15 @@ async def print_slice(
 ) -> dict[str, Any]:
     """Print elements of a Rust slice, Vec, or Box<[T]>.
 
-    This tool automatically extracts the data pointer from Rust slice types
-    (Vec<T>, &[T], Box<[T]>, [T; N]) and uses print_array internally.
+    This tool automatically extracts the data pointer from STANDARD Rust types:
+    - Vec<T>
+    - &[T] and &mut [T]
+    - Box<[T]>
+    - [T; N] fixed-size arrays
 
-    When to use print_slice vs print_array:
-    - print_slice: For Rust types (Vec, &[T], Box<[T]>, arrays)
-    - print_array: For raw pointers or when you have a pointer expression
+    For custom structs with pointer+length fields (e.g., path.points where
+    you see data_pointer and length fields), use print_array instead with
+    the data pointer expression (e.g., "path.points.data_pointer").
 
     Args:
         session_id: The session identifier
