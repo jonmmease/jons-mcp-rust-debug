@@ -710,7 +710,10 @@ async fn test_async_operation() {
 }
 ```
 
-No special configuration needed.
+**Note on async locals**: At certain points (like loop starts or await boundaries),
+`list_locals` may show the future wrapper (`body`) rather than your variables.
+This is how Rust async works - variables live inside the future's state machine.
+Step forward or use `print_variable` with specific variable names to see values.
 
 ### Complete Example: Debugging an Integration Test
 
