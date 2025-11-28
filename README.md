@@ -646,7 +646,7 @@ The tool automatically resolves the crate's directory using `cargo metadata`.
 
 **Integration tests** (in `tests/` directory):
 - `target`: the test file name without `.rs` extension
-- `args`: depends on whether test is inside a module
+- `args`: filter path starts from *within* the test file
 
 ```rust
 // tests/test_data.rs
@@ -665,19 +665,34 @@ mod tests {
 ```
 
 **Lib tests** (in `src/` with `#[cfg(test)]`):
-- Use the full module path in both `target` and `args`
+- `target`: leave empty (builds all lib tests)
+- `args`: filter path *includes the source module name*
 
-```python
-start_debug(
-    target_type="test",
-    target="my_module::tests::test_name",
-    args=["my_module::tests::test_name", "--exact"]
-)
+```rust
+// src/lyon_utils.rs
+mod tests {
+    #[test]
+    fn test_multi_polygon() { }
+}
+// → args: ["lyon_utils::tests::test_multi_polygon", "--exact"]
+
+// src/foo/bar.rs
+mod tests {
+    #[test]
+    fn test_something() { }
+}
+// → args: ["foo::bar::tests::test_something", "--exact"]
 ```
+
+This is the key difference: integration test filters start from within the file, while lib test filters include the full module path from the crate root.
 
 **To find the correct filter**, run:
 ```bash
+# For integration tests
 cargo test --test <test_file> -- --list
+
+# For lib tests
+cargo test --lib -- --list
 ```
 
 ### Breakpoint File Paths

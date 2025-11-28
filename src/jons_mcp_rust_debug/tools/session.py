@@ -28,11 +28,19 @@ async def start_debug(
             - For integration tests (tests/ dir): the file name without .rs
             - For lib tests: can be empty to build all tests
         args: Command line arguments to pass to the program. For tests, this is
-            the test filter. IMPORTANT: Use the full module path for tests inside
-            a module. Run `cargo test --test <file> -- --list` to see the correct
-            filter format. Examples:
+            the test filter. IMPORTANT: The filter path differs by test type:
+
+            Integration tests (tests/ directory):
+            - Filter path starts from within the test file
             - Test directly in file: ["test_name", "--exact"]
             - Test in mod tests {}: ["tests::test_name", "--exact"]
+
+            Lib tests (src/ with #[cfg(test)]):
+            - Filter path includes the source module name
+            - src/utils.rs mod tests {}: ["utils::tests::test_name", "--exact"]
+            - src/foo/bar.rs mod tests {}: ["foo::bar::tests::test_name", "--exact"]
+
+            Run `cargo test -- --list` to see all available test paths.
         cargo_flags: Additional cargo build flags (e.g., ["--release"])
         env: Environment variables for the build process
         package: Package name for workspace projects (e.g., "my-crate").
