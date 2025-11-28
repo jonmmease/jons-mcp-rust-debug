@@ -95,7 +95,6 @@ def _register_tools() -> None:
         list_watchpoints,
         next,
         print_array,
-        print_slice,
         print_variable,
         remove_breakpoint,
         remove_watchpoint,
@@ -138,11 +137,10 @@ def _register_tools() -> None:
     mcp.tool()(up)
     mcp.tool()(down)
 
-    # Inspection (7 tools)
+    # Inspection (6 tools)
     mcp.tool()(list_source)
     mcp.tool()(print_variable)
     mcp.tool()(print_array)
-    mcp.tool()(print_slice)
     mcp.tool()(list_locals)
     mcp.tool()(evaluate)
     mcp.tool()(set_variable)

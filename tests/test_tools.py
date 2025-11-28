@@ -251,46 +251,6 @@ class TestPrintArray:
         assert "not paused" in result["error"].lower()
 
 
-class TestPrintSlice:
-    """Tests for print_slice tool."""
-
-    @pytest.mark.asyncio
-    async def test_print_slice_session_not_found(
-        self, mock_debug_client: MagicMock
-    ) -> None:
-        """Test print_slice with non-existent session."""
-        mock_debug_client.sessions = {}
-
-        with patch(
-            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
-            return_value=mock_debug_client,
-        ):
-            from src.jons_mcp_rust_debug.tools.inspection import print_slice
-
-            result = await print_slice("nonexistent", "my_slice", count=10)
-
-        assert result["status"] == "error"
-
-    @pytest.mark.asyncio
-    async def test_print_slice_not_paused(
-        self, mock_debug_client: MagicMock, mock_session: MagicMock
-    ) -> None:
-        """Test print_slice when not paused."""
-        mock_session.state = DebuggerState.RUNNING
-        mock_debug_client.sessions = {"test_session_1": mock_session}
-
-        with patch(
-            "src.jons_mcp_rust_debug.tools.inspection.ensure_debug_client",
-            return_value=mock_debug_client,
-        ):
-            from src.jons_mcp_rust_debug.tools.inspection import print_slice
-
-            result = await print_slice("test_session_1", "my_slice", count=10)
-
-        assert result["status"] == "error"
-        assert "not paused" in result["error"].lower()
-
-
 class TestWatchpoints:
     """Tests for watchpoint tools."""
 

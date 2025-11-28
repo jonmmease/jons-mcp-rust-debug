@@ -457,12 +457,18 @@ Returns:
 ```
 
 #### print_array
-Print elements of an array or pointer range using LLDB's parray command.
+Print elements of an array, slice, Vec, or pointer range.
+
+Usage patterns:
+- Vec/slice: `my_vec.as_ptr()` with count
+- Fixed array: `&my_array[0]` with count
+- Raw pointer: `my_ptr` with count
+- Custom struct: `my_struct.data_ptr` with count
 ```
 Args:
   session_id: The session identifier
-  expression: Array/pointer expression to index (e.g., "arr", "ptr", "&vec[0]")
-  count: Number of elements to print
+  expression: Pointer expression (e.g., "my_vec.as_ptr()", "&arr[0]", "data_ptr")
+  count: Number of elements to print (required)
   start: Starting index (default: 0)
   element_type: Optional type for pointer casting (e.g., "i32")
   limit: Max characters to return (optional, for pagination)
@@ -473,32 +479,6 @@ Returns:
   start: Starting index used
   count: Number of elements printed
   element_type: Type used (if specified)
-  pagination: Pagination info (if limit specified)
-```
-
-#### print_slice
-Print elements of a Rust slice, Vec, or Box<[T]>.
-
-Works with standard Rust types: Vec<T>, &[T], &mut [T], Box<[T]>, [T; N].
-
-For custom structs with pointer+length fields (e.g., `path.points` where you
-see `data_pointer` and `length` fields), use print_array with the data pointer.
-```
-Args:
-  session_id: The session identifier
-  expression: Slice expression (e.g., "my_vec", "&slice[..]", "my_array")
-  count: Number of elements to print (required)
-  start: Starting index (default: 0)
-  limit: Max characters to return (optional, for pagination)
-  offset: Starting character position (optional, for pagination)
-Returns:
-  output: Formatted slice elements
-  expression: The evaluated expression
-  start: Starting index used
-  count: Number of elements printed
-  detected_length: Total length of the slice (if detectable)
-  detected_type: Rust type of the slice
-  data_ptr_expression: Internal pointer expression used
   pagination: Pagination info (if limit specified)
 ```
 

@@ -240,14 +240,14 @@ class TestDebugLifecycle:
         finally:
             await stop_debug(session_id)
 
-    async def test_print_slice(
+    async def test_print_array_slice(
         self, debug_client_for_test_samples: Any
     ) -> None:
-        """Test print_slice on a Rust slice.
+        """Test print_array on a Rust slice using data_ptr.
 
         This test verifies:
         1. Can set breakpoint and run to it
-        2. print_slice can display slice contents using slice data_ptr
+        2. print_array can display slice contents using slice data_ptr
         3. Output contains expected slice values
         """
         from src.jons_mcp_rust_debug.tools import (

@@ -13,7 +13,6 @@ from .inspection import (
     list_locals,
     list_source,
     print_array,
-    print_slice,
     print_variable,
     set_variable,
 )
@@ -49,7 +48,6 @@ __all__ = [
     "list_source",
     "print_variable",
     "print_array",
-    "print_slice",
     "list_locals",
     "evaluate",
     "set_variable",

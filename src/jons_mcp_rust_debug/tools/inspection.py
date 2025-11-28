@@ -289,12 +289,18 @@ async def print_array(
     limit: int | None = None,
     offset: int | None = None,
 ) -> dict[str, Any]:
-    """Print elements of an array or pointer range using LLDB's parray command.
+    """Print elements of an array, slice, Vec, or pointer range.
+
+    Usage patterns:
+    - Vec/slice: expression="my_vec.as_ptr()" with count
+    - Fixed array: expression="&my_array[0]" with count
+    - Raw pointer: expression="my_ptr" with count
+    - Custom struct: expression="my_struct.data_ptr" with count
 
     Args:
         session_id: The session identifier
-        expression: Array/pointer expression to index (e.g., "arr", "ptr", "&vec[0]")
-        count: Number of elements to print
+        expression: Pointer expression (e.g., "my_vec.as_ptr()", "&arr[0]", "ptr")
+        count: Number of elements to print (required)
         start: Starting index (default 0)
         element_type: Optional type for pointer casting (e.g., "i32")
         limit: Character limit for pagination
@@ -469,157 +475,4 @@ async def set_variable(
         "old_value": old_value,
         "new_value": new_value,
         "type": type_name,
-    }
-
-
-async def print_slice(
-    session_id: str,
-    expression: str,
-    count: int,
-    start: int = 0,
-    limit: int | None = None,
-    offset: int | None = None,
-) -> dict[str, Any]:
-    """Print elements of a Rust slice, Vec, or Box<[T]>.
-
-    This tool automatically extracts the data pointer from STANDARD Rust types:
-    - Vec<T>
-    - &[T] and &mut [T]
-    - Box<[T]>
-    - [T; N] fixed-size arrays
-
-    For custom structs with pointer+length fields (e.g., path.points where
-    you see data_pointer and length fields), use print_array instead with
-    the data pointer expression (e.g., "path.points.data_pointer").
-
-    Args:
-        session_id: The session identifier
-        expression: Slice expression (e.g., "my_vec", "&slice[..]", "my_array")
-        count: Number of elements to print (required)
-        start: Starting index (default 0)
-        limit: Character limit for pagination
-        offset: Character offset for pagination
-
-    Returns:
-        Dictionary with slice elements output and pagination info
-    """
-    client = ensure_debug_client()
-
-    try:
-        session = validate_session(client.sessions, session_id)
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-    if session.state != DebuggerState.PAUSED:
-        return {
-            "status": "error",
-            "error": f"Cannot print slice: debugger is {session.state.value}, not paused",
-        }
-
-    try:
-        thread = get_active_thread(session.process)
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-    frame = thread.GetSelectedFrame()
-    if not frame or not frame.IsValid():
-        return {"status": "error", "error": "No active frame"}
-
-    # Evaluate the expression to get the slice/vec value
-    result = frame.EvaluateExpression(expression)
-    if not result or result.GetError().Fail():
-        error_msg = result.GetError().GetCString() if result else "Unknown error"
-        return {
-            "status": "error",
-            "error": f"Failed to evaluate expression '{expression}': {error_msg}",
-        }
-
-    type_name = result.GetTypeName() or ""
-
-    # Try to extract data pointer and length based on the type
-    data_ptr_expr = None
-    length_expr = None
-    detected_length = None
-
-    # Handle Vec<T>
-    if "Vec<" in type_name or "vec::Vec<" in type_name:
-        # Vec has buf.ptr.pointer and len fields
-        data_ptr_expr = f"({expression}).as_ptr()"
-        length_expr = f"({expression}).len()"
-    # Handle &[T] or &mut [T] slices
-    elif type_name.startswith("&[") or type_name.startswith("&mut ["):
-        # Slice reference - use as_ptr() and len()
-        data_ptr_expr = f"({expression}).as_ptr()"
-        length_expr = f"({expression}).len()"
-    # Handle Box<[T]>
-    elif "Box<[" in type_name:
-        data_ptr_expr = f"({expression}).as_ptr()"
-        length_expr = f"({expression}).len()"
-    # Handle fixed-size arrays [T; N]
-    elif type_name.startswith("[") and ";" in type_name:
-        # Fixed array - extract N from [T; N]
-        try:
-            # Parse the size from type like "[i32; 5]"
-            size_part = type_name.split(";")[1].strip().rstrip("]").strip()
-            detected_length = int(size_part)
-            data_ptr_expr = f"&({expression})[0]"
-        except (ValueError, IndexError):
-            data_ptr_expr = f"&({expression})[0]"
-    else:
-        # Try to treat it as a pointer/array directly
-        # This handles raw pointers and C-style arrays
-        data_ptr_expr = expression
-
-    # Get the length if we have a length expression
-    if length_expr and detected_length is None:
-        len_result = frame.EvaluateExpression(length_expr)
-        if len_result and not len_result.GetError().Fail():
-            try:
-                detected_length = int(len_result.GetValue() or "0")
-            except ValueError:
-                pass
-
-    # Use the provided count (required parameter)
-
-    # If start is beyond the length, return empty
-    if detected_length is not None and start >= detected_length:
-        return {
-            "output": "",
-            "expression": expression,
-            "start": start,
-            "count": 0,
-            "detected_length": detected_length,
-            "detected_type": type_name,
-            "pagination": {
-                "total_chars": 0,
-                "offset": 0,
-                "limit": limit,
-                "has_more": False,
-            },
-        }
-
-    # Delegate to print_array
-    array_result = await print_array(
-        session_id=session_id,
-        expression=data_ptr_expr,
-        count=count,
-        start=start if data_ptr_expr != expression else 0,  # Only apply start if we have data_ptr
-        element_type=None,
-        limit=limit,
-        offset=offset,
-    )
-
-    # Enhance the result with slice-specific info
-    if array_result.get("status") == "error":
-        return array_result
-
-    return {
-        "output": array_result.get("output", ""),
-        "expression": expression,
-        "start": start,
-        "count": count,
-        "detected_length": detected_length,
-        "detected_type": type_name,
-        "data_ptr_expression": data_ptr_expr,
-        "pagination": array_result.get("pagination", {}),
     }
