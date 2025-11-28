@@ -403,3 +403,59 @@ class TestDebugLifecycle:
 
         finally:
             await stop_debug(session_id)
+
+    async def test_async_breakpoint_in_tokio_test(
+        self, debug_client_for_test_samples: Any
+    ) -> None:
+        """Test breakpoint in async code with #[tokio::test].
+
+        This test verifies that breakpoints in async tests work correctly.
+        The tokio runtime runs async code on worker threads (thread #2+),
+        and the debugger correctly detects breakpoint hits on those threads.
+
+        Key: The test filter must include the full module path
+        (e.g., 'tests::test_async_breakpoint', not 'test_async_breakpoint').
+        """
+        from src.jons_mcp_rust_debug.tools import (
+            run,
+            set_breakpoint,
+            start_debug,
+            stop_debug,
+        )
+
+        # Start debug session for the async_tests test binary
+        # Note: Test filter needs the full path including module: tests::test_async_breakpoint
+        result = await start_debug(
+            target_type="test",
+            target="async_tests",
+            args=["tests::test_async_breakpoint", "--exact", "--no-capture"],
+        )
+        assert result.get("status") != "error", f"Failed to start: {result.get('error')}"
+        session_id = result["session_id"]
+
+        try:
+            # Set breakpoint at line 8 in async_tests.rs: let step1 = value + 10;
+            # This is inside the async_computation function
+            bp_result = await set_breakpoint(
+                session_id=session_id,
+                file="async_tests.rs",
+                line=8,
+            )
+            assert bp_result.get("status") != "error", f"Failed to set breakpoint: {bp_result.get('error')}"
+            assert "breakpoint_id" in bp_result, f"No breakpoint_id in result: {bp_result}"
+
+            # Run to breakpoint - this is where the bug manifests
+            # The test completes without hitting the breakpoint because
+            # the async code runs on a tokio worker thread
+            run_result = await run(session_id)
+
+            # Assert we hit the breakpoint (this will fail due to the bug)
+            assert run_result.get("status") == "paused", \
+                f"Expected paused at breakpoint, got status: {run_result.get('status')}"
+            assert "breakpoint" in run_result.get("stop_reason", ""), \
+                f"Expected breakpoint stop reason, got: {run_result.get('stop_reason')}"
+            assert "async_tests.rs:8" in (run_result.get("current_location") or ""), \
+                f"Expected location async_tests.rs:8, got: {run_result.get('current_location')}"
+
+        finally:
+            await stop_debug(session_id)

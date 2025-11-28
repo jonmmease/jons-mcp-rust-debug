@@ -186,28 +186,39 @@ class RustDebugClient:
         cargo_flags = cargo_flags or []
 
         # Build command based on target type
+        # Check if user explicitly provided --test or --lib in cargo_flags
+        has_explicit_test = any(f.startswith("--test") for f in cargo_flags)
+        has_explicit_lib = "--lib" in cargo_flags
+
         if target_type == "test":
             cmd = [cargo, "test", "--no-run"]
-            # Check if target looks like a test function path (contains ::)
-            # or if it's a test file name
-            if target and "::" not in target:
-                # Could be an integration test file, try --test
-                test_file = (
-                    Path(self.config.working_directory) / "tests" / f"{target}.rs"
-                )
-                if test_file.exists():
-                    cmd.extend(["--test", target])
-                else:
-                    # Not a test file, assume lib tests
-                    if "--lib" not in cargo_flags:
+            # If user explicitly provided --test, skip auto-detection
+            if not has_explicit_test and not has_explicit_lib:
+                # Check if target looks like a test function path (contains ::)
+                # or if it's a test file name
+                if target and "::" not in target:
+                    # Could be an integration test file, try --test
+                    test_file = (
+                        Path(self.config.working_directory) / "tests" / f"{target}.rs"
+                    )
+                    # Also check for test files in root with [[test]] in Cargo.toml
+                    root_test_file = (
+                        Path(self.config.working_directory) / f"{target}.rs"
+                    )
+                    if test_file.exists():
+                        cmd.extend(["--test", target])
+                    elif root_test_file.exists():
+                        # Test file is in root directory (declared in Cargo.toml [[test]])
+                        cmd.extend(["--test", target])
+                    else:
+                        # Not a test file, assume lib tests
                         cmd.append("--lib")
-            elif not target:
-                # No target specified, build lib tests
-                if "--lib" not in cargo_flags:
+                elif not target:
+                    # No target specified, build lib tests
                     cmd.append("--lib")
-            # If target contains ::, it's a function path - just build lib tests
-            elif "::" in target and "--lib" not in cargo_flags:
-                cmd.append("--lib")
+                # If target contains ::, it's a function path - just build lib tests
+                elif "::" in target:
+                    cmd.append("--lib")
         elif target_type == "example":
             cmd = [cargo, "build", "--example", target]
         else:  # binary
@@ -322,83 +333,134 @@ class RustDebugClient:
 
     def _event_handler_thread(self, session: DebugSession) -> None:
         """Thread to handle LLDB events."""
+        logger.info(f"Event handler thread started for session {session.session_id}")
         try:
             while not session.stop_requested.is_set():
                 # Check process validity
                 if not session.process or not session.process.IsValid():
+                    logger.debug("Process invalid, stopping event handler")
                     break
 
+                logger.debug(f"Waiting for event (timeout={EVENT_POLL_TIMEOUT}s)...")
                 event = lldb.SBEvent()
                 if session.listener and session.listener.WaitForEvent(
                     EVENT_POLL_TIMEOUT, event
                 ):
                     # Check stop flag again after wait
                     if session.stop_requested.is_set():
+                        logger.debug("Stop requested, exiting event handler")
                         break
 
                     if lldb.SBProcess.EventIsProcessEvent(event):
                         state = lldb.SBProcess.GetStateFromEvent(event)
+                        state_name = lldb.SBDebugger.StateAsCString(state)
+                        logger.info(f"Process event received | State: {state_name} ({state})")
 
                         # Use lock for thread-safe state updates
                         with session._lock:
                             if state == lldb.eStateStopped:
+                                logger.info("State: STOPPED - updating stop info and pausing session")
                                 session.state = DebuggerState.PAUSED
                                 self._update_stop_info(session)
                                 session.state_changed.set()
                             elif state == lldb.eStateRunning:
+                                logger.info("State: RUNNING - session is now running")
                                 session.state = DebuggerState.RUNNING
                                 session.state_changed.clear()
                             elif state == lldb.eStateExited:
+                                logger.info("State: EXITED - session finished")
                                 session.state = DebuggerState.FINISHED
                                 session.state_changed.set()
                                 break  # Process exited, stop the thread
                             elif state == lldb.eStateCrashed:
+                                logger.info("State: CRASHED - session error")
                                 session.state = DebuggerState.ERROR
                                 session.state_changed.set()
+                    else:
+                        logger.debug("Event is not a process event")
+                else:
+                    logger.debug("No event received within timeout")
 
         except Exception as e:
             logger.error(f"Event handler error: {e}")
             with session._lock:
                 session.state = DebuggerState.ERROR
                 session.state_changed.set()
+        finally:
+            logger.info(f"Event handler thread exiting for session {session.session_id}")
 
     def _update_stop_info(self, session: DebugSession) -> None:
         """Update stop information when process stops."""
+        logger.info("=== Updating stop info ===")
         if not session.process or not session.process.IsValid():
+            logger.warning("Process is invalid, cannot update stop info")
             return
 
+        # Log all threads and their states
+        num_threads = session.process.GetNumThreads()
+        logger.info(f"Process has {num_threads} thread(s)")
+
         # Find the thread that caused the stop (e.g., hit a breakpoint)
+        from .utils import stop_reason_to_string
+
         thread = None
-        for i in range(session.process.GetNumThreads()):
+        for i in range(num_threads):
             t = session.process.GetThreadAtIndex(i)
             if t and t.IsValid():
+                thread_id = t.GetThreadID()
                 reason = t.GetStopReason()
+                reason_str = stop_reason_to_string(reason)
+
+                logger.info(
+                    f"Thread {i}: ID={thread_id}, Valid={t.IsValid()}, "
+                    f"StopReason={reason_str} ({reason})"
+                )
+
                 if reason != lldb.eStopReasonNone:
+                    logger.info(f"Thread {i} has non-None stop reason, selecting it")
                     thread = t
                     # Select this thread for future operations
                     session.process.SetSelectedThread(t)
+                    logger.info(f"Selected thread {i} (ID={thread_id}) for debugging")
                     break
+            else:
+                logger.debug(f"Thread {i} is invalid")
 
         if not thread:
             # Fallback to selected thread
+            logger.info("No thread with stop reason found, using selected thread")
             thread = session.process.GetSelectedThread()
+            if thread and thread.IsValid():
+                thread_id = thread.GetThreadID()
+                logger.info(f"Using selected thread ID={thread_id}")
+            else:
+                logger.warning("Selected thread is also invalid")
 
         if not thread or not thread.IsValid():
+            logger.warning("No valid thread found, cannot update stop info")
             return
 
         # Get stop reason
         stop_reason = thread.GetStopReason()
+        stop_reason_str = stop_reason_to_string(stop_reason)
+        logger.info(f"Final stop reason: {stop_reason_str} ({stop_reason})")
+
         if stop_reason == lldb.eStopReasonBreakpoint:
             bp_id = thread.GetStopReasonDataAtIndex(0)
             session.last_stop_reason = f"breakpoint_{bp_id}"
+            logger.info(f"Stopped at breakpoint {bp_id}")
         elif stop_reason == lldb.eStopReasonSignal:
             session.last_stop_reason = "signal"
+            logger.info("Stopped due to signal")
         elif stop_reason == lldb.eStopReasonException:
             session.last_stop_reason = "exception"
+            logger.info("Stopped due to exception")
         elif stop_reason == lldb.eStopReasonPlanComplete:
             session.last_stop_reason = "step"
+            logger.info("Stopped after step completion")
         else:
             session.last_stop_reason = "unknown"
+            logger.warning(f"Unknown stop reason: {stop_reason_str}")
 
         # Get current location - ensure we're at the right frame
         frame = thread.GetFrameAtIndex(0)  # Get frame 0 which is where we stopped
@@ -408,9 +470,17 @@ class RustDebugClient:
             if line_entry.IsValid():
                 file_spec = line_entry.GetFileSpec()
                 if file_spec.IsValid():
-                    session.current_location = (
-                        f"{file_spec.GetFilename()}:{line_entry.GetLine()}"
-                    )
+                    location = f"{file_spec.GetFilename()}:{line_entry.GetLine()}"
+                    session.current_location = location
+                    logger.info(f"Current location: {location}")
+                else:
+                    logger.debug("File spec is invalid")
+            else:
+                logger.debug("Line entry is invalid")
+        else:
+            logger.debug("Frame 0 is invalid")
+
+        logger.info("=== Stop info update complete ===")
 
     def create_session(
         self,

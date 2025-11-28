@@ -3,6 +3,9 @@ name = "rust-debug-samples"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
 [[bin]]
 name = "sample_program"
 path = "sample_program.rs"
@@ -10,3 +13,7 @@ path = "sample_program.rs"
 [[test]]
 name = "sample_tests"
 path = "sample_tests.rs"
+
+[[test]]
+name = "async_tests"
+path = "async_tests.rs"
