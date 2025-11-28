@@ -769,11 +769,14 @@ The server leverages LLDB's Python API (via the `lldb-python` package) which pro
 
 ### Common Issues
 
-1. **"LLDB Python module not found"**: 
+1. **"LLDB Python module not found"**:
    - Run: `uv pip install lldb-python --prerelease=allow`
    - Ensure you're using Python 3.10-3.12
 2. **Build failures**: Ensure cargo can build your project normally
 3. **Permission denied on macOS**: LLDB may require developer tools or code signing
+4. **String literals show extra text**: `&str` may display adjacent literals
+   (e.g., "seattlestocksbarley...") because string literals are stored
+   contiguously in the binary. This is normal - focus on the start of the string.
 
 ### Debugging the Debugger
 
